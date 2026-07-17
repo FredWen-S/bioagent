@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import uuid
 from pathlib import Path
 
 from app.operator.dry_run import DryRunOperator
-from app.schemas.gui_action import ActionType, GuiAction
 from app.storage.database import FigureDatabase
 from app.workflow.engine import WorkflowEngine
 
@@ -81,64 +79,121 @@ def cmd_browser_login(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_phase0_probe(args: argparse.Namespace) -> int:
+def _require_live_confirmation(args: argparse.Namespace, operation: str) -> None:
     if not args.confirm_live:
         raise SystemExit(
-            "Live Phase 0 changes a BioRender Figure. Re-run with --confirm-live after opening "
-            "a disposable blank Figure and reviewing the command."
+            f"{operation} uses a live BioRender editor. Re-run with --confirm-live after "
+            "opening a disposable blank Figure and reviewing the command."
         )
-    from app.operator.playwright_live import LivePlaywrightOperator
 
-    figure_id = f"figure_phase0_{uuid.uuid4().hex[:10]}"
-    definitions = [
-        (
-            ActionType.OPEN_EDITOR,
-            {
-                "url": args.editor_url,
-                "project_name": "BioRender Agent Phase 0 Probe",
-                "create_new": args.create_new,
-            },
-        ),
-        (
-            ActionType.SEARCH_ASSET,
-            {
-                "entity_id": "probe_asset",
-                "query": args.query,
-                "fallback_queries": ["T lymphocyte", "immune cell"],
-                "max_queries": 3,
-            },
-        ),
-        (ActionType.SELECT_ASSET, {"entity_id": "probe_asset", "candidate_index": 0}),
-        (
-            ActionType.DRAG_ASSET,
-            {
-                "entity_id": "probe_asset",
-                "target_x": args.target_x,
-                "target_y": args.target_y,
-                "target_width": 0.14,
-            },
-        ),
-        (ActionType.CAPTURE_CANVAS, {"scope": "full_canvas"}),
-    ]
-    actions = [
-        GuiAction(
-            id=f"action_{index:04d}_{action_type.value}",
-            figure_id=figure_id,
-            sequence=index,
-            action=action_type,
-            arguments=arguments,
-        )
-        for index, (action_type, arguments) in enumerate(definitions)
-    ]
+
+def cmd_calibrate_ui(args: argparse.Namespace) -> int:
+    _require_live_confirmation(args, "UI calibration")
+    from app.operator.playwright_live import LivePlaywrightOperator
+    from app.operator.biorender.calibration import BioRenderUiCalibrator
+    from app.operator.errors import CalibrationFailed
+
+    database = _database(args.database)
     operator = LivePlaywrightOperator(headed=True)
-    results = []
     try:
-        for action in actions:
-            results.append(operator.execute(action).model_dump(mode="json"))
+        page = operator.page
+        page.goto(args.editor_url, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(1500)
+        profile, profile_path = BioRenderUiCalibrator(
+            page, database=database
+        ).calibrate()
+        print(
+            json.dumps(
+                {
+                    "status": profile.status.value,
+                    "profile_id": profile.profile_id,
+                    "ui_profile_version": profile.ui_profile_version,
+                    "profile_path": str(profile_path),
+                    "screenshot_path": profile.screenshot_path,
+                    "ai_controls_recorded": len(profile.ai_controls),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    except CalibrationFailed as error:
+        profile_payload = None
+        if error.profile_path and Path(error.profile_path).exists():
+            try:
+                profile_payload = json.loads(
+                    Path(error.profile_path).read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                profile_payload = None
+        print(
+            json.dumps(
+                {
+                    "status": (
+                        profile_payload.get("status", "invalid")
+                        if profile_payload
+                        else "invalid"
+                    ),
+                    "error_type": error.error_type,
+                    "message": str(error),
+                    "workflow_state": "calibrating_ui",
+                    "last_action": "calibrate_ui",
+                    "profile_path": error.profile_path,
+                    "screenshot_path": (
+                        profile_payload.get("screenshot_path") if profile_payload else None
+                    ),
+                    "recommended_manual_checkpoint": (
+                        "Open the calibration screenshot, close blocking UI, and verify the "
+                        "search/results/canvas regions before retrying."
+                    ),
+                    "safe_to_resume": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
     finally:
         operator.close()
-    print(json.dumps({"figure_id": figure_id, "results": results}, ensure_ascii=False, indent=2))
-    return 0
+
+
+def cmd_phase0_search_drag(args: argparse.Namespace) -> int:
+    _require_live_confirmation(args, "Phase 0 search-and-drag probe")
+    if not args.resume_run and not args.editor_url:
+        raise SystemExit("--editor-url is required unless --resume-run is provided")
+    from app.operator.biorender.probe import BioRenderSingleAssetProbe
+    from app.operator.playwright_live import LivePlaywrightOperator
+
+    database = _database(args.database)
+    operator = LivePlaywrightOperator(headed=True)
+    try:
+        outcome = BioRenderSingleAssetProbe(
+            operator.page,
+            database,
+        ).run(
+            editor_url=args.editor_url or "",
+            query=args.query,
+            target_x=args.target_x,
+            target_y=args.target_y,
+            target_width=args.target_width,
+            resume_run_id=args.resume_run,
+        )
+        print(json.dumps(outcome, ensure_ascii=False, indent=2))
+        return 0 if outcome.get("status") in {
+            "awaiting_confirmation",
+            "completed_probe",
+        } else 2
+    finally:
+        operator.close()
+
+
+def cmd_phase0_probe(args: argparse.Namespace) -> int:
+    """Backward-compatible alias for the verified Phase 0 command."""
+    if not hasattr(args, "resume_run"):
+        args.resume_run = None
+    if not hasattr(args, "target_width"):
+        args.target_width = 0.14
+    return cmd_phase0_search_drag(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -169,6 +224,27 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("--url", default="https://app.biorender.com/")
     login.set_defaults(func=cmd_browser_login)
 
+    calibrate = subparsers.add_parser(
+        "calibrate-ui",
+        help="LIVE: calibrate BioRender search/results/canvas regions and save evidence",
+    )
+    calibrate.add_argument("--editor-url", required=True)
+    calibrate.add_argument("--confirm-live", action="store_true")
+    calibrate.set_defaults(func=cmd_calibrate_ui)
+
+    search_drag = subparsers.add_parser(
+        "phase0-search-drag",
+        help="LIVE: safely search, drag, observe, and reconcile one ordinary asset",
+    )
+    search_drag.add_argument("--editor-url")
+    search_drag.add_argument("--query", default="T cell")
+    search_drag.add_argument("--target-x", type=float, default=0.5)
+    search_drag.add_argument("--target-y", type=float, default=0.5)
+    search_drag.add_argument("--target-width", type=float, default=0.14)
+    search_drag.add_argument("--resume-run")
+    search_drag.add_argument("--confirm-live", action="store_true")
+    search_drag.set_defaults(func=cmd_phase0_search_drag)
+
     phase0 = subparsers.add_parser(
         "phase0-probe",
         help="LIVE: search and drag one asset into a disposable blank Figure",
@@ -177,7 +253,8 @@ def build_parser() -> argparse.ArgumentParser:
     phase0.add_argument("--query", default="T cell")
     phase0.add_argument("--target-x", type=float, default=0.5)
     phase0.add_argument("--target-y", type=float, default=0.5)
-    phase0.add_argument("--create-new", action="store_true")
+    phase0.add_argument("--target-width", type=float, default=0.14)
+    phase0.add_argument("--resume-run")
     phase0.add_argument(
         "--confirm-live",
         action="store_true",

@@ -19,10 +19,16 @@ class ActionType(StrEnum):
 
 
 class ActionStatus(StrEnum):
+    PLANNED = "planned"
+    EXECUTING = "executing"
+    EXECUTED_UNVERIFIED = "executed_unverified"
+    VERIFIED = "verified"
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    UNKNOWN = "unknown"
+    BLOCKED_BY_POLICY = "blocked_by_policy"
     SKIPPED = "skipped"
     PAUSED = "paused"
 
@@ -31,6 +37,31 @@ class RiskLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class CoordinateSpace(StrEnum):
+    NORMALIZED_CANVAS = "normalized_canvas"
+    CANVAS_PIXELS = "canvas_pixels"
+    VIEWPORT_PIXELS = "viewport_pixels"
+
+
+class ObservationSource(StrEnum):
+    DOM = "dom"
+    ACCESSIBILITY = "accessibility"
+    SCREENSHOT_PIXEL_DIFF = "screenshot_pixel_diff"
+    VISION_MODEL = "vision_model"
+    BACKEND_OBJECT = "backend_object"
+    MANUAL = "manual"
+
+
+class BoundingBox(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    x: float
+    y: float
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    coordinate_space: CoordinateSpace
 
 
 class GuiAction(BaseModel):
@@ -46,6 +77,7 @@ class GuiAction(BaseModel):
     requires_screenshot: bool = True
     risk_level: RiskLevel = RiskLevel.LOW
     requires_approval: bool = False
+    expected_bbox: BoundingBox | None = None
 
     @model_validator(mode="after")
     def high_risk_requires_approval(self) -> "GuiAction":
@@ -63,6 +95,18 @@ class GuiActionResult(BaseModel):
     error_type: str | None = None
     message: str | None = None
     screenshot_path: str | None = None
-    observed_bbox: tuple[int, int, int, int] | None = None
+    expected_bbox: BoundingBox | None = None
+    observed_bbox: BoundingBox | None = None
+    observation_confidence: float | None = Field(default=None, ge=0, le=1)
+    observation_source: ObservationSource | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def observed_geometry_requires_evidence(self) -> "GuiActionResult":
+        if self.observed_bbox is not None:
+            if self.observation_confidence is None or self.observation_source is None:
+                raise ValueError(
+                    "observed_bbox requires observation_confidence and observation_source"
+                )
+        return self

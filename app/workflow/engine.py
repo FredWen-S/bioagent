@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.operator.action_planner import GuiActionPlanner
 from app.operator.base import GuiOperator
-from app.operator.errors import AuthenticationRequired, OperatorError
+from app.operator.errors import AuthenticationRequired, OperatorError, PolicyBlocked
 from app.operator.safety import ActionSafetyPolicy, UnsafeActionError
 from app.planner.asset_search_planner import AssetSearchPlanner
 from app.planner.figure_planner import ScientificFigurePlanner
@@ -77,6 +77,15 @@ class WorkflowEngine:
                         self.database.record_action_result(figure_id, last_result)
                         self.database.set_status(figure_id, FigureStatus.PAUSED_AUTHENTICATION)
                         return FigureStatus.PAUSED_AUTHENTICATION
+                    except PolicyBlocked as error:
+                        last_result = GuiActionResult(
+                            action_id=action.id,
+                            status=ActionStatus.BLOCKED_BY_POLICY,
+                            attempt=attempt,
+                            error_type=error.error_type,
+                            message=str(error),
+                            expected_bbox=action.expected_bbox,
+                        )
                     except OperatorError as error:
                         last_result = GuiActionResult(
                             action_id=action.id,
@@ -84,6 +93,7 @@ class WorkflowEngine:
                             attempt=attempt,
                             error_type=error.error_type,
                             message=str(error),
+                            expected_bbox=action.expected_bbox,
                         )
                     except Exception as error:  # preserve evidence and stop safely
                         last_result = GuiActionResult(
@@ -92,11 +102,23 @@ class WorkflowEngine:
                             attempt=attempt,
                             error_type=type(error).__name__,
                             message=str(error),
+                            expected_bbox=action.expected_bbox,
                         )
                     self.database.record_action_result(figure_id, last_result)
-                    if last_result.status == ActionStatus.SUCCEEDED:
+                    if last_result.status in {ActionStatus.SUCCEEDED, ActionStatus.VERIFIED}:
                         succeeded = True
                         break
+                    if last_result.status in {
+                        ActionStatus.EXECUTED_UNVERIFIED,
+                        ActionStatus.UNKNOWN,
+                    }:
+                        self.database.set_status(
+                            figure_id, FigureStatus.PAUSED_RECONCILIATION
+                        )
+                        return FigureStatus.PAUSED_RECONCILIATION
+                    if last_result.status == ActionStatus.BLOCKED_BY_POLICY:
+                        self.database.set_status(figure_id, FigureStatus.PAUSED_APPROVAL)
+                        return FigureStatus.PAUSED_APPROVAL
                 if not succeeded:
                     self.database.set_status(figure_id, FigureStatus.FAILED)
                     return FigureStatus.FAILED
@@ -128,4 +150,3 @@ class WorkflowEngine:
             raise ValueError("a figure can only be completed after awaiting user confirmation")
         self.database.set_status(figure_id, FigureStatus.COMPLETED)
         return FigureStatus.COMPLETED
-

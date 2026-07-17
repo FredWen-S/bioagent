@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.schemas.asset_plan import AssetSearchPlan
 from app.schemas.figure_spec import FigureSpec, RelationType
-from app.schemas.gui_action import ActionType, GuiAction
+from app.schemas.gui_action import ActionType, BoundingBox, CoordinateSpace, GuiAction
 from app.schemas.layout_spec import LayoutSpec
 
 
@@ -46,7 +46,7 @@ class GuiActionPlanner:
 
         add(
             ActionType.OPEN_EDITOR,
-            {"project_name": spec.title, "url": editor_url, "create_new": True},
+            {"project_name": spec.title, "url": editor_url, "create_new": False},
         )
         for item in assets.items:
             placement = placements[item.entity_id]
@@ -59,7 +59,13 @@ class GuiActionPlanner:
                     "max_queries": len(item.search_terms),
                 },
             )
-            add(ActionType.SELECT_ASSET, {"entity_id": item.entity_id, "candidate_index": 0})
+            add(
+                ActionType.SELECT_ASSET,
+                {
+                    "entity_id": item.entity_id,
+                    "selection_policy": "best_safe_ordinary_asset",
+                },
+            )
             add(
                 ActionType.DRAG_ASSET,
                 {
@@ -68,6 +74,17 @@ class GuiActionPlanner:
                     "target_y": placement.y,
                     "target_width": placement.width,
                 },
+            )
+            actions[-1] = actions[-1].model_copy(
+                update={
+                    "expected_bbox": BoundingBox(
+                        x=max(0.0, placement.x - placement.width / 2),
+                        y=max(0.0, placement.y - placement.width / 2),
+                        width=placement.width,
+                        height=placement.width,
+                        coordinate_space=CoordinateSpace.NORMALIZED_CANVAS,
+                    )
+                }
             )
             add(
                 ActionType.ADD_TEXT,

@@ -13,6 +13,8 @@ class Settings:
     database_path: Path = ROOT_DIR / "runtime" / "agent.db"
     screenshot_dir: Path = ROOT_DIR / "runtime" / "screenshots"
     session_dir: Path = ROOT_DIR / "runtime" / "sessions"
+    calibration_dir: Path = ROOT_DIR / "output" / "playwright" / "calibration"
+    probe_dir: Path = ROOT_DIR / "output" / "playwright" / "probes"
     max_action_retries: int = 2
     max_repair_rounds: int = 3
     max_element_moves: int = 3
@@ -22,7 +24,8 @@ class Settings:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.calibration_dir.mkdir(parents=True, exist_ok=True)
+        self.probe_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
-

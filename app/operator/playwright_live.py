@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.operator.biorender.drag import SafeAssetDrag
+from app.operator.biorender.locators import CANVAS_LOCATORS, resolve_largest_visible
+from app.operator.biorender.policy_guard import BioRenderPolicyGuard
+from app.operator.biorender.search import RuntimeCandidate, SafeAssetSearch
 from app.operator.errors import (
     AuthenticationRequired,
     DragDropFailed,
@@ -35,12 +39,12 @@ class LivePlaywrightOperator:
         self.evidence_dir = evidence_dir or settings.screenshot_dir
         self.headed = headed
         self.policy = ActionSafetyPolicy()
+        self.biorender_policy = BioRenderPolicyGuard()
         self._playwright: Any = None
         self._context: Any = None
         self._page: Any = None
-        self._selected_candidate: Any = None
         self._selected_entity_id: str | None = None
-        self._entity_boxes: dict[str, tuple[int, int, int, int]] = {}
+        self._safe_candidate: RuntimeCandidate | None = None
 
     @staticmethod
     def require_playwright() -> Any:
@@ -69,6 +73,7 @@ class LivePlaywrightOperator:
     def execute(self, action: GuiAction, attempt: int = 1) -> GuiActionResult:
         self.policy.check(action)
         self.start()
+        self.biorender_policy.assert_page_safe(self._page)
         dispatch = {
             ActionType.OPEN_EDITOR: self._open_editor,
             ActionType.SEARCH_ASSET: self._search_asset,
@@ -84,13 +89,16 @@ class LivePlaywrightOperator:
             )
         metadata = handler(action)
         screenshot_path = self._screenshot(action)
+        expected_bbox = metadata.pop("expected_bbox", action.expected_bbox)
         return GuiActionResult(
             action_id=action.id,
-            status=ActionStatus.SUCCEEDED,
+            status=ActionStatus.EXECUTED_UNVERIFIED,
             attempt=attempt,
-            message=f"Live action {action.action.value} completed.",
+            message=f"Live action {action.action.value} executed; observation is still required.",
             screenshot_path=str(screenshot_path),
-            observed_bbox=metadata.pop("observed_bbox", None),
+            expected_bbox=expected_bbox,
+            observed_bbox=None,
+            evidence_refs=[str(screenshot_path)],
             metadata={"mode": "live", "evidence_kind": "screenshot", **metadata},
         )
 
@@ -133,70 +141,68 @@ class LivePlaywrightOperator:
         return {"url": page.url, "title": page.title()}
 
     def _search_asset(self, action: GuiAction) -> dict[str, Any]:
-        search = self._first_visible(
-            [
-                "input[placeholder*='search' i]",
-                "[role='searchbox']",
-                "input[type='search']",
-                "[data-testid*='search'] input",
-            ]
-        )
-        if search is None:
-            raise UiLayoutChanged("BioRender asset search input was not found")
         queries = [action.arguments["query"], *action.arguments.get("fallback_queries", [])]
         queries = queries[: int(action.arguments.get("max_queries", 5))]
+        failures: list[str] = []
         for query in queries:
-            search.click()
-            search.fill(query)
-            self._page.wait_for_timeout(1200)
-            candidates = self._candidate_locator()
-            if candidates is not None and candidates.count() > 0:
-                return {"selected_query": query, "candidate_count": candidates.count()}
-        raise SearchNoResult(f"No visible BioRender asset result for queries: {queries}")
+            try:
+                outcome = SafeAssetSearch(
+                    self._page,
+                    evidence_dir=self.evidence_dir,
+                    policy=self.biorender_policy,
+                ).search(query, action.figure_id)
+                self._safe_candidate = outcome.selected
+                self._selected_entity_id = str(action.arguments["entity_id"])
+                return {
+                    "selected_query": query,
+                    "candidate_count": len(outcome.candidates),
+                    "selected_candidate": outcome.selected.record.model_dump(mode="json"),
+                    "search_evidence": [
+                        outcome.screenshot_path,
+                        outcome.results_screenshot_path,
+                    ],
+                }
+            except SearchNoResult as error:
+                failures.append(str(error))
+        raise SearchNoResult(
+            f"No proven ordinary BioRender asset for queries {queries}: {failures}"
+        )
 
     def _select_asset(self, action: GuiAction) -> dict[str, Any]:
-        candidates = self._candidate_locator()
-        index = int(action.arguments["candidate_index"])
-        if candidates is None or candidates.count() <= index:
-            raise SearchNoResult(f"Asset candidate index {index} is unavailable")
-        candidate = candidates.nth(index)
-        candidate.scroll_into_view_if_needed()
-        if not candidate.is_visible():
-            raise SearchNoResult(f"Asset candidate index {index} is not visible")
-        self._selected_candidate = candidate
-        self._selected_entity_id = str(action.arguments["entity_id"])
-        box = candidate.bounding_box()
-        return {"candidate_index": index, "source_bbox": box}
+        if self._safe_candidate is None:
+            raise SearchNoResult("No policy-verified ordinary asset candidate is selected")
+        self.biorender_policy.assert_target_allowed(
+            self._safe_candidate.locator, candidate_context=True
+        )
+        return {
+            "candidate_index": self._safe_candidate.record.ordinal,
+            "candidate_id": self._safe_candidate.record.candidate_id,
+            "source_bbox": self._safe_candidate.record.bbox.model_dump(mode="json"),
+        }
 
     def _drag_asset(self, action: GuiAction) -> dict[str, Any]:
-        if self._selected_candidate is None:
-            raise DragDropFailed("No asset candidate is selected")
-        source = self._selected_candidate.bounding_box()
-        canvas_locator = self._canvas_locator()
-        canvas = canvas_locator.bounding_box() if canvas_locator is not None else None
-        if source is None or canvas is None:
-            raise DragDropFailed("Source asset or canvas bounding box is unavailable")
-        target_x = canvas["x"] + canvas["width"] * float(action.arguments["target_x"])
-        target_y = canvas["y"] + canvas["height"] * float(action.arguments["target_y"])
-        source_x = source["x"] + source["width"] / 2
-        source_y = source["y"] + source["height"] / 2
-        self._page.mouse.move(source_x, source_y)
-        self._page.mouse.down()
-        self._page.mouse.move(target_x, target_y, steps=20)
-        self._page.mouse.up()
-        self._page.wait_for_timeout(900)
-        width = max(40, int(canvas["width"] * float(action.arguments.get("target_width", 0.12))))
-        observed = (
-            int(target_x - width / 2),
-            int(target_y - width / 2),
-            width,
-            width,
+        if self._safe_candidate is None:
+            raise DragDropFailed("No policy-verified ordinary asset candidate is selected")
+        drag = SafeAssetDrag(
+            self._page,
+            evidence_dir=self.evidence_dir,
+            policy=self.biorender_policy,
         )
-        entity_id = str(action.arguments["entity_id"])
-        self._entity_boxes[entity_id] = observed
-        self._selected_candidate = None
+        prepared = drag.prepare(
+            self._safe_candidate,
+            action.figure_id,
+            target_x=float(action.arguments["target_x"]),
+            target_y=float(action.arguments["target_y"]),
+            target_width=float(action.arguments.get("target_width", 0.12)),
+        )
+        after_path = drag.execute(prepared)
+        self._safe_candidate = None
         self._selected_entity_id = None
-        return {"observed_bbox": observed, "coordinate_mode": "normalized_canvas"}
+        return {
+            "expected_bbox": prepared.expected_bbox,
+            "baseline_canvas_path": prepared.baseline_canvas_path,
+            "after_canvas_path": after_path,
+        }
 
     def _capture_canvas(self, action: GuiAction) -> dict[str, Any]:
         canvas = self._canvas_locator()
@@ -219,27 +225,8 @@ class LivePlaywrightOperator:
         )
 
     def _canvas_locator(self) -> Any | None:
-        return self._first_visible(
-            [
-                "[data-testid*='canvas']",
-                ".konvajs-content",
-                "main canvas",
-                "canvas",
-            ]
-        )
-
-    def _candidate_locator(self) -> Any | None:
-        selectors = [
-            "[data-testid*='asset-card']",
-            "[data-testid*='search-result']",
-            "[draggable='true']",
-            "[class*='asset'] img",
-        ]
-        for selector in selectors:
-            locator = self._page.locator(selector)
-            if locator.count() > 0:
-                return locator
-        return None
+        resolved = resolve_largest_visible(self._page, CANVAS_LOCATORS)
+        return resolved.locator if resolved else None
 
     def _first_visible(self, selectors: list[str]) -> Any | None:
         for selector in selectors:
@@ -270,6 +257,11 @@ class LivePlaywrightOperator:
         self._playwright = None
         self._page = None
 
+    @property
+    def page(self) -> Any:
+        self.start()
+        return self._page
+
     @classmethod
     def manual_login(cls, url: str = "https://app.biorender.com/") -> None:
         operator = cls(headed=True)
@@ -280,4 +272,3 @@ class LivePlaywrightOperator:
             input("After the dashboard/editor is visible, press Enter here to preserve the session: ")
         finally:
             operator.close()
-

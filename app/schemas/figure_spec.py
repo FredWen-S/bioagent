@@ -45,6 +45,7 @@ class FigureStatus(StrEnum):
     COMPLETED = "completed"
     PAUSED_AUTHENTICATION = "paused_authentication"
     PAUSED_APPROVAL = "paused_approval"
+    PAUSED_RECONCILIATION = "paused_reconciliation"
     BLOCKED = "blocked"
     FAILED = "failed"
 
@@ -116,4 +117,3 @@ class FigureSpec(BaseModel):
             if relation.source == relation.target:
                 raise ValueError(f"relation {relation.id!r} cannot connect an entity to itself")
         return self
-
