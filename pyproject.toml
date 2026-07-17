@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "biorender-gui-agent"
+version = "0.1.0"
+description = "Auditable, recoverable MVP for planning and operating BioRender figures"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110,<1",
+  "pydantic>=2.7,<3",
+  "uvicorn>=0.29,<1",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.48,<2"]
+dev = ["pytest>=8,<9", "httpx>=0.27,<1", "ruff>=0.6,<1"]
+
+[project.scripts]
+biorender-agent = "app.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --basetemp=runtime/pytest-temp"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
