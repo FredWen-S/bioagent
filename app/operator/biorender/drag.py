@@ -45,6 +45,7 @@ class SafeAssetDrag:
         target_x: float,
         target_y: float,
         target_width: float,
+        evidence_stem: str = "asset",
     ) -> PreparedDrag:
         if not 0 <= target_x <= 1 or not 0 <= target_y <= 1:
             raise ValueError("target coordinates must be normalized to 0..1")
@@ -75,8 +76,12 @@ class SafeAssetDrag:
             raise DragDropFailed("Expected asset bounding box would extend outside the canvas")
         run_dir = self.evidence_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        baseline = run_dir / "canvas-before-drag.png"
-        after = run_dir / "canvas-after-drag.png"
+        safe_stem = "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in evidence_stem
+        )[:120]
+        baseline = run_dir / f"{safe_stem}-canvas-before-drag.png"
+        after = run_dir / f"{safe_stem}-canvas-after-drag.png"
         canvas.locator.screenshot(path=str(baseline))
         return PreparedDrag(
             candidate=candidate,

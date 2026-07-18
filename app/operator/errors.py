@@ -1,6 +1,10 @@
 class OperatorError(RuntimeError):
     error_type = "operator_error"
 
+    def __init__(self, message: str, *, screenshot_path: str | None = None) -> None:
+        super().__init__(message)
+        self.screenshot_path = screenshot_path
+
 
 class AuthenticationRequired(OperatorError):
     error_type = "authentication_required"

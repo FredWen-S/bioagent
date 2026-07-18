@@ -10,7 +10,12 @@ class AssetSearchPlanner:
         "tumor cell": ["tumor cell", "cancer cell", "malignant cell", "cell"],
         "pd-1 receptor": ["PD-1 receptor", "PD-1", "cell surface receptor", "receptor"],
         "pd-l1 ligand": ["PD-L1 ligand", "PD-L1", "membrane ligand", "protein"],
-        "anti-pd-1 antibody": ["anti-PD-1 antibody", "monoclonal antibody", "antibody", "Y antibody"],
+        "anti-pd-1 antibody": [
+            "anti-PD-1 antibody",
+            "monoclonal antibody",
+            "antibody",
+            "Y antibody",
+        ],
     }
 
     def plan(self, spec: FigureSpec) -> AssetSearchPlan:
@@ -45,4 +50,3 @@ class AssetSearchPlanner:
                 seen.add(key)
                 result.append(item.strip())
         return result
-

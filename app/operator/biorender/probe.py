@@ -100,9 +100,7 @@ class BioRenderSingleAssetProbe:
                 last_action = "reconcile_before_replay"
                 self._last_action = last_action
                 checkpoint = ProbeCheckpoint.model_validate(stored["checkpoint"])
-                reconciliation = self._reconcile(
-                    run_id, checkpoint, profile.ui_profile_version
-                )
+                reconciliation = self._reconcile(run_id, checkpoint, profile.ui_profile_version)
                 if reconciliation.get("decision") != ReconciliationDecision.SAFE_TO_RETRY.value:
                     return reconciliation
 
@@ -123,7 +121,10 @@ class BioRenderSingleAssetProbe:
                 workflow_state="awaiting_authentication",
                 last_action=getattr(self, "_last_action", last_action),
                 safe_to_resume=True,
-                recommendation="Manually authenticate, reopen the same blank Figure, then resume the run.",
+                recommendation=(
+                    "Manually authenticate, reopen the same blank Figure, "
+                    "then resume the run."
+                ),
             )
         except PolicyBlocked as error:
             return self._record_failure(
@@ -133,7 +134,10 @@ class BioRenderSingleAssetProbe:
                 workflow_state=workflow_state.value,
                 last_action=getattr(self, "_last_action", last_action),
                 safe_to_resume=False,
-                recommendation="Inspect the policy screenshot; close AI/credits/subscription UI manually.",
+                recommendation=(
+                    "Inspect the policy screenshot; close AI/credits/subscription "
+                    "UI manually."
+                ),
             )
         except OperatorError as error:
             return self._record_failure(
@@ -143,7 +147,9 @@ class BioRenderSingleAssetProbe:
                 workflow_state=workflow_state.value,
                 last_action=getattr(self, "_last_action", last_action),
                 safe_to_resume=False,
-                recommendation="Inspect the saved screenshot and calibration profile before retrying.",
+                recommendation=(
+                    "Inspect the saved screenshot and calibration profile before retrying."
+                ),
             )
         except Exception as error:
             return self._record_failure(
@@ -153,7 +159,10 @@ class BioRenderSingleAssetProbe:
                 workflow_state=workflow_state.value,
                 last_action=getattr(self, "_last_action", last_action),
                 safe_to_resume=False,
-                recommendation="Unexpected failure; inspect evidence and do not replay the drag automatically.",
+                recommendation=(
+                    "Unexpected failure; inspect evidence and do not replay the "
+                    "drag automatically."
+                ),
             )
 
     def _search_drag_verify(
@@ -171,9 +180,7 @@ class BioRenderSingleAssetProbe:
         run_dir.mkdir(parents=True, exist_ok=True)
         search_id = "probe_search_asset"
         self._last_action = "search_asset"
-        self.database.record_probe_action(
-            run_id, search_id, ActionStatus.EXECUTING
-        )
+        self.database.record_probe_action(run_id, search_id, ActionStatus.EXECUTING)
         search = SafeAssetSearch(
             self.page,
             evidence_dir=self.output_dir,
@@ -348,9 +355,7 @@ class BioRenderSingleAssetProbe:
                 "safe_to_resume": False,
                 "recommended_manual_checkpoint": str(current_path),
             }
-            self.database.update_probe_run(
-                run_id, ProbeStatus.UNKNOWN, result=payload
-            )
+            self.database.update_probe_run(run_id, ProbeStatus.UNKNOWN, result=payload)
             return payload
         return {
             "run_id": run_id,
@@ -473,9 +478,7 @@ class BioRenderSingleAssetProbe:
             "safe_to_resume": safe_to_resume,
         }
         self.database.update_probe_run(run_id, status, error=payload, result=payload)
-        self.database.add_audit_event(
-            "probe_paused_or_failed", payload, run_id=run_id
-        )
+        self.database.add_audit_event("probe_paused_or_failed", payload, run_id=run_id)
         return payload
 
     def _assert_authenticated(self) -> None:
@@ -487,5 +490,6 @@ class BioRenderSingleAssetProbe:
             r"(?:login|log-in|sign-in|signin)", str(self.page.url), re.IGNORECASE
         ):
             raise AuthenticationRequired(
-                "BioRender requires manual authentication; credentials are never entered by the agent"
+                "BioRender requires manual authentication; credentials are never "
+                "entered by the agent"
             )

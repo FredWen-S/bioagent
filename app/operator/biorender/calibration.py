@@ -74,9 +74,7 @@ class BioRenderUiCalibrator:
         if canvas is None:
             diagnostics.append("required canvas region was not found")
         if modals:
-            diagnostics.append(
-                "visible modal blocks calibration: " + modals[0].classification
-            )
+            diagnostics.append("visible modal blocks calibration: " + modals[0].classification)
         try:
             if self.page.locator("input[type='password']").count() > 0:
                 diagnostics.append("authentication input is visible")
@@ -84,9 +82,7 @@ class BioRenderUiCalibrator:
             pass
 
         status = CalibrationStatus.VALID
-        if modals and any(
-            modal.classification != "unknown_modal" for modal in modals
-        ):
+        if modals and any(modal.classification != "unknown_modal" for modal in modals):
             status = CalibrationStatus.BLOCKED_BY_POLICY
         elif diagnostics:
             status = CalibrationStatus.INVALID
@@ -97,9 +93,10 @@ class BioRenderUiCalibrator:
             "results": results.evidence.model_dump() if results else None,
             "canvas": canvas.evidence.model_dump() if canvas else None,
         }
-        profile_version = "ui-" + hashlib.sha256(
-            json.dumps(signature, sort_keys=True).encode("utf-8")
-        ).hexdigest()[:12]
+        profile_version = (
+            "ui-"
+            + hashlib.sha256(json.dumps(signature, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        )
         profile = UiCalibrationProfile(
             profile_id=profile_id,
             ui_profile_version=profile_version,
@@ -117,9 +114,7 @@ class BioRenderUiCalibrator:
             diagnostics=diagnostics,
         )
         profile_path = run_dir / "profile.json"
-        profile_path.write_text(
-            profile.model_dump_json(indent=2), encoding="utf-8"
-        )
+        profile_path.write_text(profile.model_dump_json(indent=2), encoding="utf-8")
         if self.database is not None:
             self.database.save_calibration_profile(profile, str(profile_path))
         if status != CalibrationStatus.VALID:
@@ -154,7 +149,11 @@ class BioRenderUiCalibrator:
         for query in ancestor_queries:
             try:
                 ancestor = search_locator.locator(query)
-                if ancestor.count() and ancestor.first.is_visible() and ancestor.first.bounding_box():
+                if (
+                    ancestor.count()
+                    and ancestor.first.is_visible()
+                    and ancestor.first.bounding_box()
+                ):
                     return ResolvedLocator(
                         locator=ancestor.first,
                         evidence=LocatorEvidence(

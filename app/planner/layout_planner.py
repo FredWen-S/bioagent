@@ -19,8 +19,22 @@ class LayoutPlanner:
         if len(region_ids) != 2:
             raise ValueError("two-panel layout requires exactly two entity regions")
         regions = [
-            Region(id=region_ids[0], title=self._humanize(region_ids[0]), x=0.04, y=0.1, width=0.44, height=0.84),
-            Region(id=region_ids[1], title=self._humanize(region_ids[1]), x=0.52, y=0.1, width=0.44, height=0.84),
+            Region(
+                id=region_ids[0],
+                title=self._humanize(region_ids[0]),
+                x=0.04,
+                y=0.1,
+                width=0.44,
+                height=0.84,
+            ),
+            Region(
+                id=region_ids[1],
+                title=self._humanize(region_ids[1]),
+                x=0.52,
+                y=0.1,
+                width=0.44,
+                height=0.84,
+            ),
         ]
         placements: list[Placement] = []
         for region in regions:
@@ -114,4 +128,3 @@ class LayoutPlanner:
     @staticmethod
     def _humanize(value: str) -> str:
         return value.replace("_", " ").title()
-

@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 ONE_PIXEL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
@@ -17,7 +16,7 @@ class FakeElement:
     bbox: dict[str, float] | None = None
     visible: bool = True
     attrs: dict[str, str] = field(default_factory=dict)
-    children: dict[str, list["FakeElement"]] = field(default_factory=dict)
+    children: dict[str, list[FakeElement]] = field(default_factory=dict)
     has_thumbnail: bool = False
     filled_value: str | None = None
     clicked: bool = False
@@ -30,11 +29,11 @@ class FakeLocator:
     def count(self) -> int:
         return len(self.elements)
 
-    def nth(self, index: int) -> "FakeLocator":
+    def nth(self, index: int) -> FakeLocator:
         return FakeLocator([self.elements[index]]) if index < len(self.elements) else FakeLocator()
 
     @property
-    def first(self) -> "FakeLocator":
+    def first(self) -> FakeLocator:
         return self.nth(0)
 
     def is_visible(self) -> bool:
@@ -62,7 +61,7 @@ class FakeLocator:
     def scroll_into_view_if_needed(self) -> None:
         return None
 
-    def locator(self, selector: str) -> "FakeLocator":
+    def locator(self, selector: str) -> FakeLocator:
         matches: list[FakeElement] = []
         for element in self.elements:
             matches.extend(element.children.get(selector, []))

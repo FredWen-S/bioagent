@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -15,6 +14,7 @@ class Settings:
     session_dir: Path = ROOT_DIR / "runtime" / "sessions"
     calibration_dir: Path = ROOT_DIR / "output" / "playwright" / "calibration"
     probe_dir: Path = ROOT_DIR / "output" / "playwright" / "probes"
+    live_figure_dir: Path = ROOT_DIR / "output" / "playwright" / "figures"
     max_action_retries: int = 2
     max_repair_rounds: int = 3
     max_element_moves: int = 3
@@ -26,6 +26,7 @@ class Settings:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.calibration_dir.mkdir(parents=True, exist_ok=True)
         self.probe_dir.mkdir(parents=True, exist_ok=True)
+        self.live_figure_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

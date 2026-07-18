@@ -12,8 +12,14 @@ class ActionType(StrEnum):
     SELECT_ASSET = "select_asset_candidate"
     DRAG_ASSET = "drag_selected_asset"
     ADD_TEXT = "add_text"
+    EDIT_TEXT = "edit_text"
     CONNECT = "connect_elements"
     MOVE_ELEMENT = "move_element"
+    RESIZE_ELEMENT = "resize_element"
+    ROTATE_ELEMENT = "rotate_element"
+    GROUP_ELEMENTS = "group_elements"
+    ALIGN_ELEMENTS = "align_elements"
+    DISTRIBUTE_ELEMENTS = "distribute_elements"
     CAPTURE_CANVAS = "capture_canvas"
     SAVE_PROJECT = "save_project"
 
@@ -80,7 +86,7 @@ class GuiAction(BaseModel):
     expected_bbox: BoundingBox | None = None
 
     @model_validator(mode="after")
-    def high_risk_requires_approval(self) -> "GuiAction":
+    def high_risk_requires_approval(self) -> GuiAction:
         if self.risk_level == RiskLevel.HIGH and not self.requires_approval:
             raise ValueError("high-risk actions must require explicit approval")
         return self
@@ -103,7 +109,7 @@ class GuiActionResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def observed_geometry_requires_evidence(self) -> "GuiActionResult":
+    def observed_geometry_requires_evidence(self) -> GuiActionResult:
         if self.observed_bbox is not None:
             if self.observation_confidence is None or self.observation_source is None:
                 raise ValueError(

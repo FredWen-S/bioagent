@@ -38,7 +38,9 @@ class ScientificValidityGuard:
 
         pair_types: dict[frozenset[str], set[RelationType]] = {}
         for relation in spec.relations:
-            pair_types.setdefault(frozenset((relation.source, relation.target)), set()).add(relation.type)
+            pair_types.setdefault(frozenset((relation.source, relation.target)), set()).add(
+                relation.type
+            )
         for pair, types in pair_types.items():
             if RelationType.ACTIVATION in types and RelationType.INHIBITION in types:
                 issues.append(
@@ -87,4 +89,3 @@ class ScientificValidityGuard:
     @staticmethod
     def _normalize(value: str) -> str:
         return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", value.casefold())
-

@@ -46,6 +46,122 @@ CANVAS_LOCATORS = (
     LocatorSpec("css", "canvas", confidence=0.68),
 )
 
+CLEAR_SELECTION_LOCATORS = (
+    LocatorSpec("css", "[data-testid='canvas-container']", confidence=0.9),
+    LocatorSpec("css", "[data-testid*='canvas']", confidence=0.8),
+)
+
+SELECTED_OBJECT_LOCATORS = (
+    LocatorSpec("css", "[data-testid*='canvas-element'][data-selected='true']", confidence=0.98),
+    LocatorSpec("css", "[data-testid*='selection-box']", confidence=0.94),
+    LocatorSpec("css", "[class*='selection-box']", confidence=0.8),
+    LocatorSpec("css", "[class*='transformer']", confidence=0.75),
+)
+
+RESIZE_HANDLE_LOCATORS = (
+    LocatorSpec("css", "[data-testid*='resize-handle']", confidence=0.98),
+    LocatorSpec("label", r"resize|调整大小|缩放", confidence=0.92),
+    LocatorSpec("css", "[class*='resize-handle']", confidence=0.78),
+    LocatorSpec("css", "[class*='transformer'] [class*='bottom-right']", confidence=0.72),
+)
+
+ROTATE_HANDLE_LOCATORS = (
+    LocatorSpec("css", "[data-testid*='rotate-handle']", confidence=0.98),
+    LocatorSpec("label", r"rotate|旋转", confidence=0.92),
+    LocatorSpec("css", "[class*='rotate-handle']", confidence=0.78),
+)
+
+TEXT_TOOL_LOCATORS = (
+    LocatorSpec("role", r"^(?:text|add text|文字|文本)$", role="button", confidence=0.98),
+    LocatorSpec("label", r"^(?:text|add text|文字|文本)$", confidence=0.94),
+    LocatorSpec("css", "[data-testid*='text-tool']", confidence=0.92),
+)
+
+CONNECTOR_TOOL_LOCATORS: dict[str, tuple[LocatorSpec, ...]] = {
+    "arrow": (
+        LocatorSpec("role", r"arrow|箭头", role="button", confidence=0.96),
+        LocatorSpec("label", r"arrow|箭头", confidence=0.92),
+        LocatorSpec("css", "[data-testid*='arrow-tool']", confidence=0.9),
+    ),
+    "line": (
+        LocatorSpec("role", r"^(?:line|connector|连接线|直线)$", role="button", confidence=0.94),
+        LocatorSpec("label", r"line|connector|连接线|直线", confidence=0.9),
+        LocatorSpec("css", "[data-testid*='line-tool']", confidence=0.88),
+    ),
+    "t_bar": (
+        LocatorSpec("role", r"inhibition|inhibit|t[- ]?bar|抑制", role="button", confidence=0.96),
+        LocatorSpec("label", r"inhibition|inhibit|t[- ]?bar|抑制", confidence=0.92),
+        LocatorSpec("css", "[data-testid*='inhibition-tool']", confidence=0.9),
+    ),
+    "blocking_line": (
+        LocatorSpec(
+            "role", r"inhibition|blocking|block|t[- ]?bar|阻断", role="button", confidence=0.94
+        ),
+        LocatorSpec("label", r"inhibition|blocking|block|t[- ]?bar|阻断", confidence=0.9),
+        LocatorSpec("css", "[data-testid*='inhibition-tool']", confidence=0.88),
+    ),
+}
+
+GROUP_TOOL_LOCATORS = (
+    LocatorSpec("role", r"^group$|分组|组合", role="button", confidence=0.96),
+    LocatorSpec("label", r"^group$|分组|组合", confidence=0.92),
+    LocatorSpec("css", "[data-testid*='group']", confidence=0.86),
+)
+
+ALIGN_TOOL_LOCATORS: dict[str, tuple[LocatorSpec, ...]] = {
+    "left": (
+        LocatorSpec("role", r"align left|左对齐", role="button", confidence=0.94),
+        LocatorSpec("label", r"align left|左对齐", confidence=0.9),
+    ),
+    "center": (
+        LocatorSpec("role", r"align center|水平居中", role="button", confidence=0.94),
+        LocatorSpec("label", r"align center|水平居中", confidence=0.9),
+    ),
+    "middle": (
+        LocatorSpec("role", r"align middle|垂直居中", role="button", confidence=0.94),
+        LocatorSpec("label", r"align middle|垂直居中", confidence=0.9),
+    ),
+    "right": (
+        LocatorSpec("role", r"align right|右对齐", role="button", confidence=0.94),
+        LocatorSpec("label", r"align right|右对齐", confidence=0.9),
+    ),
+}
+
+DISTRIBUTE_TOOL_LOCATORS: dict[str, tuple[LocatorSpec, ...]] = {
+    "horizontal": (
+        LocatorSpec(
+            "role",
+            r"distribute horizontally|horizontal distribution|水平分布",
+            role="button",
+            confidence=0.94,
+        ),
+        LocatorSpec(
+            "label",
+            r"distribute horizontally|horizontal distribution|水平分布",
+            confidence=0.9,
+        ),
+    ),
+    "vertical": (
+        LocatorSpec(
+            "role",
+            r"distribute vertically|vertical distribution|垂直分布",
+            role="button",
+            confidence=0.94,
+        ),
+        LocatorSpec(
+            "label",
+            r"distribute vertically|vertical distribution|垂直分布",
+            confidence=0.9,
+        ),
+    ),
+}
+
+SAVE_STATUS_LOCATORS = (
+    LocatorSpec("text", r"all changes saved|saved|已保存|所有更改已保存", confidence=0.94),
+    LocatorSpec("css", "[data-testid*='save-status']", confidence=0.9),
+    LocatorSpec("css", "[aria-label*='saved' i]", confidence=0.86),
+)
+
 CANDIDATE_SELECTORS = (
     "[data-testid*='asset-card']",
     "[data-testid*='search-result']",
@@ -60,9 +176,7 @@ def resolve_first_visible(page: Any, specs: tuple[LocatorSpec, ...]) -> Resolved
     for spec in specs:
         try:
             if spec.strategy == "role":
-                locator = page.get_by_role(
-                    spec.role, name=re.compile(spec.query, re.IGNORECASE)
-                )
+                locator = page.get_by_role(spec.role, name=re.compile(spec.query, re.IGNORECASE))
             elif spec.strategy == "label":
                 locator = page.get_by_label(re.compile(spec.query, re.IGNORECASE))
             elif spec.strategy == "text":
@@ -91,9 +205,7 @@ def resolve_largest_visible(page: Any, specs: tuple[LocatorSpec, ...]) -> Resolv
     for spec in specs:
         try:
             if spec.strategy == "role":
-                locator = page.get_by_role(
-                    spec.role, name=re.compile(spec.query, re.IGNORECASE)
-                )
+                locator = page.get_by_role(spec.role, name=re.compile(spec.query, re.IGNORECASE))
             elif spec.strategy == "label":
                 locator = page.get_by_label(re.compile(spec.query, re.IGNORECASE))
             elif spec.strategy == "text":

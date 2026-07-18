@@ -21,7 +21,7 @@ class AssetSearchItem(BaseModel):
     preferred_visual_features: list[str] = Field(default_factory=list, max_length=6)
     status: AssetMatchStatus = AssetMatchStatus.PENDING
     selected_query: str | None = None
-    selected_candidate: int | None = Field(default=None, ge=0)
+    selected_candidate_id: str | None = None
 
 
 class AssetSearchPlan(BaseModel):
@@ -29,4 +29,3 @@ class AssetSearchPlan(BaseModel):
 
     figure_id: str
     items: list[AssetSearchItem] = Field(min_length=1, max_length=15)
-

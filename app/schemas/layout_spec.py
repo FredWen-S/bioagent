@@ -18,7 +18,7 @@ class Region(BaseModel):
     height: float = Field(gt=0, le=1)
 
     @model_validator(mode="after")
-    def stay_on_canvas(self) -> "Region":
+    def stay_on_canvas(self) -> Region:
         if self.x + self.width > 1.000001 or self.y + self.height > 1.000001:
             raise ValueError(f"region {self.id!r} extends outside the normalized canvas")
         return self
@@ -45,7 +45,7 @@ class LayoutSpec(BaseModel):
     placements: list[Placement] = Field(min_length=1, max_length=15)
 
     @model_validator(mode="after")
-    def validate_references(self) -> "LayoutSpec":
+    def validate_references(self) -> LayoutSpec:
         region_ids = {region.id for region in self.regions}
         placement_ids = [placement.entity_id for placement in self.placements]
         if len(placement_ids) != len(set(placement_ids)):

@@ -4,14 +4,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.operator.action_planner import GuiActionPlanner
-from app.operator.safety import ActionSafetyPolicy
+from app.operator.safety import ActionSafetyPolicy, UnsafeActionError
 from app.planner.asset_search_planner import AssetSearchPlanner
 from app.planner.figure_planner import ScientificFigurePlanner, UnsupportedScientificRequest
 from app.planner.layout_planner import LayoutPlanner
 from app.planner.requirement_parser import RequirementParser
 from app.schemas.figure_spec import Entity, FigureSpec, Relation
+from app.schemas.gui_action import ActionType, GuiAction
 from app.verifier.scientific_guard import ScientificValidityGuard
-
 
 PD1_REQUEST = """
 制作一张双栏机制图。左侧表示未经治疗时，肿瘤细胞上的 PD-L1 与 T 细胞上的 PD-1
@@ -43,9 +43,44 @@ def test_pd1_request_generates_valid_grounded_bundle() -> None:
     assert actions[0].action.value == "open_biorender_editor"
     assert actions[-1].action.value == "save_project"
     assert all(action.sequence == index for index, action in enumerate(actions))
+    action_types = {action.action for action in actions}
+    assert {
+        ActionType.SEARCH_ASSET,
+        ActionType.DRAG_ASSET,
+        ActionType.MOVE_ELEMENT,
+        ActionType.RESIZE_ELEMENT,
+        ActionType.ADD_TEXT,
+        ActionType.CONNECT,
+        ActionType.GROUP_ELEMENTS,
+        ActionType.ALIGN_ELEMENTS,
+        ActionType.CAPTURE_CANVAS,
+        ActionType.SAVE_PROJECT,
+    } <= action_types
     policy = ActionSafetyPolicy()
     for action in actions:
         policy.check(action)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("ai_generate", True),
+        ("menu", "Create with AI"),
+        ("dialog", "Use 1 AI credit to Generate Figure"),
+        ("operation", "AI Edit"),
+    ],
+)
+def test_action_policy_hard_blocks_biorender_ai(key: str, value: object) -> None:
+    action = GuiAction(
+        id=f"action_unsafe_{key}",
+        figure_id="figure_policy",
+        sequence=0,
+        action=ActionType.CAPTURE_CANVAS,
+        arguments={key: value},
+    )
+
+    with pytest.raises(UnsafeActionError, match="forbidden"):
+        ActionSafetyPolicy().check(action)
 
 
 def test_figure_spec_rejects_undefined_relation_reference() -> None:
@@ -88,4 +123,3 @@ def test_repeated_requests_create_distinct_figure_ids() -> None:
     first = ScientificFigurePlanner().plan(requirement)
     second = ScientificFigurePlanner().plan(requirement)
     assert first.id != second.id
-

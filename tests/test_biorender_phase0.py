@@ -7,11 +7,11 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw
 
-from app.cli import cmd_calibrate_ui, cmd_phase0_search_drag
+from app.cli import cmd_calibrate_ui, cmd_live_search_asset, cmd_phase0_search_drag
 from app.operator.biorender.calibration import BioRenderUiCalibrator
 from app.operator.biorender.locators import (
-    CANVAS_LOCATORS,
     CANDIDATE_SELECTORS,
+    CANVAS_LOCATORS,
     INTERACTIVE_SELECTOR,
     MODAL_SELECTOR,
     SEARCH_RESULTS_LOCATORS,
@@ -148,6 +148,7 @@ def test_observer_confirmation_updates_probe_action_to_verified(tmp_path: Path) 
         bbox=viewport_bbox(10, 10, 50, 50),
         draggable=True,
         in_results_region=True,
+        dom_fingerprint="dom_safe_t_cell",
         ordinary_asset_evidence=["draggable"],
     )
     checkpoint = ProbeCheckpoint(
@@ -221,6 +222,7 @@ def checkpoint_fixture(tmp_path: Path) -> ProbeCheckpoint:
             bbox=viewport_bbox(10, 10, 50, 50),
             draggable=True,
             in_results_region=True,
+            dom_fingerprint="dom_safe_t_cell",
         ),
         drag_action_id="probe_drag_asset",
     )
@@ -298,7 +300,10 @@ def test_dry_run_does_not_observe_or_modify_live_ui(tmp_path: Path) -> None:
     assert result.metadata["mode"] == "dry-run"
 
 
-@pytest.mark.parametrize("command", [cmd_calibrate_ui, cmd_phase0_search_drag])
+@pytest.mark.parametrize(
+    "command",
+    [cmd_calibrate_ui, cmd_live_search_asset, cmd_phase0_search_drag],
+)
 def test_live_commands_refuse_without_confirm_live(command) -> None:
     args = argparse.Namespace(confirm_live=False)
     with pytest.raises(SystemExit, match="--confirm-live"):
@@ -322,7 +327,9 @@ def test_ai_credit_or_subscription_modal_stops_page(modal_text: str) -> None:
         BioRenderPolicyGuard().assert_page_safe(page)
 
 
-def test_sqlite_v2_migration_adds_observation_columns(tmp_path: Path) -> None:
+def test_sqlite_migrations_add_action_and_element_observation_columns(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "legacy.db"
     connection = sqlite3.connect(path)
     connection.execute(
@@ -346,12 +353,29 @@ def test_sqlite_v2_migration_adds_observation_columns(tmp_path: Path) -> None:
 
     database = FigureDatabase(path)
     with database.connect() as migrated:
-        columns = {
+        action_columns = {
             row["name"] for row in migrated.execute("PRAGMA table_info(gui_actions)")
+        }
+        element_columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(editor_elements)")
+        }
+        versions = {
+            row["version"]
+            for row in migrated.execute("SELECT version FROM schema_migrations")
         }
     assert {
         "expected_bbox_json",
         "observed_bbox_json",
         "observation_confidence",
         "observation_source",
-    }.issubset(columns)
+    }.issubset(action_columns)
+    assert {
+        "figure_element_id",
+        "expected_bbox_json",
+        "observation_confidence",
+        "observation_source",
+        "evidence_json",
+        "verification_json",
+    }.issubset(element_columns)
+    assert {2, 3, 4}.issubset(versions)

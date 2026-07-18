@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from app.config import settings
-from app.schemas.bundle import PlanningBundle
 from app.schemas.biorender_probe import ProbeCheckpoint, ProbeStatus, UiCalibrationProfile
+from app.schemas.bundle import PlanningBundle
 from app.schemas.figure_spec import FigureStatus
-from app.schemas.gui_action import ActionStatus, GuiAction, GuiActionResult
-
+from app.schemas.gui_action import ActionStatus, BoundingBox, GuiAction, GuiActionResult
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -120,6 +120,34 @@ CREATE TABLE IF NOT EXISTS probe_actions (
     PRIMARY KEY (run_id, action_id)
 );
 
+CREATE TABLE IF NOT EXISTS editor_elements (
+    figure_id TEXT NOT NULL REFERENCES figures(id) ON DELETE CASCADE,
+    element_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    figure_element_id TEXT,
+    expected_bbox_json TEXT,
+    bbox_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    observation_confidence REAL,
+    observation_source TEXT,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    verification_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (figure_id, element_id)
+);
+
+CREATE TABLE IF NOT EXISTS element_requirements (
+    figure_id TEXT NOT NULL REFERENCES figures(id) ON DELETE CASCADE,
+    logical_element_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    scientific_role TEXT NOT NULL,
+    requirement_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (figure_id, logical_element_id)
+);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT,
@@ -136,6 +164,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 CREATE INDEX IF NOT EXISTS idx_gui_actions_figure_status
 ON gui_actions(figure_id, status, sequence);
+
+CREATE INDEX IF NOT EXISTS idx_editor_elements_figure_kind
+ON editor_elements(figure_id, kind);
+
+CREATE INDEX IF NOT EXISTS idx_element_requirements_figure_kind
+ON element_requirements(figure_id, kind);
 """
 
 
@@ -189,6 +223,31 @@ class FigureDatabase:
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (2, _now()),
         )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (3, _now()),
+        )
+        editor_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(editor_elements)").fetchall()
+        }
+        editor_additions = {
+            "figure_element_id": "TEXT",
+            "expected_bbox_json": "TEXT",
+            "observation_confidence": "REAL",
+            "observation_source": "TEXT",
+            "evidence_json": "TEXT NOT NULL DEFAULT '[]'",
+            "verification_json": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for column, column_type in editor_additions.items():
+            if column not in editor_columns:
+                connection.execute(
+                    f"ALTER TABLE editor_elements ADD COLUMN {column} {column_type}"
+                )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (4, _now()),
+        )
 
     def save_bundle(self, bundle: PlanningBundle) -> None:
         now = _now()
@@ -224,6 +283,9 @@ class FigureDatabase:
             connection.execute("DELETE FROM figure_entities WHERE figure_id = ?", (spec.id,))
             connection.execute("DELETE FROM figure_relations WHERE figure_id = ?", (spec.id,))
             connection.execute("DELETE FROM gui_actions WHERE figure_id = ?", (spec.id,))
+            connection.execute(
+                "DELETE FROM element_requirements WHERE figure_id = ?", (spec.id,)
+            )
             connection.executemany(
                 """
                 INSERT INTO figure_entities (figure_id, entity_id, payload_json)
@@ -269,6 +331,15 @@ class FigureDatabase:
                     for action in bundle.actions
                 ],
             )
+            connection.executemany(
+                """
+                INSERT INTO element_requirements (
+                    figure_id, logical_element_id, kind, scientific_role,
+                    requirement_json, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._element_requirement_rows(bundle, now),
+            )
             connection.execute(
                 """
                 INSERT INTO verification_results (
@@ -283,6 +354,199 @@ class FigureDatabase:
                     now,
                 ),
             )
+
+    @staticmethod
+    def _element_requirement_rows(
+        bundle: PlanningBundle,
+        now: str,
+    ) -> list[tuple[str, str, str, str, str, str, str]]:
+        spec = bundle.figure_spec
+        actions = bundle.actions
+
+        def action_payloads(predicate: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "action_id": action.id,
+                    "action_type": action.action.value,
+                    "sequence": action.sequence,
+                    "expected_bbox": (
+                        action.expected_bbox.model_dump(mode="json")
+                        if action.expected_bbox is not None
+                        else None
+                    ),
+                }
+                for action in actions
+                if predicate(action)
+            ]
+
+        rows: list[tuple[str, str, str, str, str, str, str]] = []
+        assets = {item.entity_id: item for item in bundle.asset_plan.items}
+        placements = {
+            placement.entity_id: placement
+            for placement in bundle.layout_spec.placements
+        }
+        for entity in spec.entities:
+            item = assets[entity.id]
+            required_actions = action_payloads(
+                lambda action, entity_id=entity.id: (
+                    action.arguments.get("entity_id") == entity_id
+                    or (
+                        action.arguments.get("element_id") == entity_id
+                        and action.arguments.get("element_kind") == "asset"
+                    )
+                )
+            )
+            expected = {
+                "logical_element_id": entity.id,
+                "concept": entity.concept,
+                "label": entity.label,
+                "region_id": entity.region_id,
+                "search_query": item.search_terms[0],
+                "fallback_queries": item.search_terms[1:],
+                "placement": placements[entity.id].model_dump(mode="json"),
+                "required_actions": required_actions,
+                "identity_policy": "weak_fingerprint_not_result_ordinal",
+            }
+            rows.append(
+                (
+                    spec.id,
+                    entity.id,
+                    "asset",
+                    entity.concept,
+                    json.dumps(expected, ensure_ascii=False),
+                    "planned",
+                    now,
+                )
+            )
+            label_id = f"label_{entity.id}"
+            label_actions = action_payloads(
+                lambda action, value=label_id: action.arguments.get("element_id") == value
+            )
+            label_expected = {
+                "logical_label_id": label_id,
+                "target_element_id": entity.id,
+                "expected_text": entity.label,
+                "required_actions": label_actions,
+                "association_rule": "exact_text_and_nearest_expected_target",
+            }
+            rows.append(
+                (
+                    spec.id,
+                    label_id,
+                    "label",
+                    f"Label for {entity.concept}",
+                    json.dumps(label_expected, ensure_ascii=False),
+                    "planned",
+                    now,
+                )
+            )
+        for relation in spec.relations:
+            connector_action = next(
+                action
+                for action in actions
+                if action.arguments.get("relation_id") == relation.id
+            )
+            connector_actions = action_payloads(
+                lambda action, value=relation.id: action.arguments.get("relation_id")
+                == value
+            )
+            connector_expected = {
+                "logical_connector_id": relation.id,
+                "source_element_id": relation.source,
+                "target_element_id": relation.target,
+                "semantic_role": relation.type.value,
+                "connector_type": connector_action.arguments["connector_type"],
+                "direction": "source_to_target",
+                "start_anchor": connector_action.arguments["start_anchor"],
+                "end_anchor": connector_action.arguments["end_anchor"],
+                "expected_route": connector_action.arguments["expected_route"],
+                "required_actions": connector_actions,
+            }
+            rows.append(
+                (
+                    spec.id,
+                    relation.id,
+                    "connector",
+                    relation.label or relation.type.value,
+                    json.dumps(connector_expected, ensure_ascii=False),
+                    "planned",
+                    now,
+                )
+            )
+        for action in actions:
+            if action.action.value == "group_elements":
+                logical_id = str(action.arguments["group_id"])
+                kind = "group"
+                role = f"Group {', '.join(action.arguments['element_ids'])}"
+            elif action.action.value in {"align_elements", "distribute_elements"}:
+                logical_id = str(action.arguments["logical_layout_id"])
+                kind = "alignment" if action.action.value == "align_elements" else "distribution"
+                role = action.action.value
+            else:
+                continue
+            rows.append(
+                (
+                    spec.id,
+                    logical_id,
+                    kind,
+                    role,
+                    json.dumps(
+                        {
+                            **action.arguments,
+                            "required_actions": action_payloads(
+                                lambda candidate, value=action.id: candidate.id == value
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "planned",
+                    now,
+                )
+            )
+        for region in bundle.layout_spec.regions:
+            rows.append(
+                (
+                    spec.id,
+                    f"region_{region.id}",
+                    "region",
+                    region.title or region.id,
+                    json.dumps(region.model_dump(mode="json"), ensure_ascii=False),
+                    "planned",
+                    now,
+                )
+            )
+        rows.extend(
+            [
+                (
+                    spec.id,
+                    "layout_z_order",
+                    "z_order",
+                    "Connectors behind assets and labels",
+                    json.dumps(
+                        {"rule": "connector_z_index_not_above_asset_or_label"},
+                        ensure_ascii=False,
+                    ),
+                    "planned",
+                    now,
+                ),
+                (
+                    spec.id,
+                    "document_save",
+                    "save_state",
+                    "BioRender editor autosave confirmation",
+                    json.dumps(
+                        {
+                            "allowed": "visible autosave status",
+                            "forbidden": ["export", "download", "share", "publish"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "planned",
+                    now,
+                ),
+            ]
+        )
+        return rows
 
     def get_figure(self, figure_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -325,6 +589,26 @@ class FigureDatabase:
                 item[output_key] = json.loads(item.pop(bbox_key)) if item[bbox_key] else None
             result.append(item)
         return result
+
+    def action_state(self, action_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, figure_id, sequence, action_type, status, attempts, error_type,
+                       result_json, expected_bbox_json, observed_bbox_json,
+                       observation_confidence, observation_source
+                FROM gui_actions WHERE id = ?
+                """,
+                (action_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["result"] = json.loads(item.pop("result_json")) if item["result_json"] else None
+        for bbox_key in ("expected_bbox_json", "observed_bbox_json"):
+            output_key = bbox_key.removesuffix("_json")
+            item[output_key] = json.loads(item.pop(bbox_key)) if item[bbox_key] else None
+        return item
 
     def pending_actions(self, figure_id: str) -> list[GuiAction]:
         with self.connect() as connection:
@@ -549,6 +833,198 @@ class FigureDatabase:
             results.append(item)
         return results
 
+    def upsert_editor_element(
+        self,
+        figure_id: str,
+        element_id: str,
+        kind: str,
+        bbox: BoundingBox,
+        *,
+        payload: dict[str, Any] | None = None,
+        status: str = "verified",
+        figure_element_id: str | None = None,
+        expected_bbox: BoundingBox | None = None,
+        observation_confidence: float | None = None,
+        observation_source: str | None = None,
+        evidence_refs: list[str] | None = None,
+        verification: dict[str, Any] | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT payload_json, evidence_json, verification_json
+                FROM editor_elements WHERE figure_id = ? AND element_id = ?
+                """,
+                (figure_id, element_id),
+            ).fetchone()
+            merged_payload = json.loads(existing["payload_json"]) if existing else {}
+            merged_payload.update(payload or {})
+            merged_evidence = json.loads(existing["evidence_json"]) if existing else []
+            merged_evidence = list(
+                dict.fromkeys([*merged_evidence, *(evidence_refs or [])])
+            )
+            merged_verification = (
+                json.loads(existing["verification_json"]) if existing else {}
+            )
+            merged_verification.update(verification or {})
+            connection.execute(
+                """
+                INSERT INTO editor_elements (
+                    figure_id, element_id, kind, figure_element_id,
+                    expected_bbox_json, bbox_json, payload_json, status,
+                    observation_confidence, observation_source, evidence_json,
+                    verification_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(figure_id, element_id) DO UPDATE SET
+                    kind=excluded.kind,
+                    figure_element_id=COALESCE(
+                        excluded.figure_element_id, editor_elements.figure_element_id
+                    ),
+                    expected_bbox_json=COALESCE(
+                        excluded.expected_bbox_json, editor_elements.expected_bbox_json
+                    ),
+                    bbox_json=excluded.bbox_json,
+                    payload_json=excluded.payload_json,
+                    status=excluded.status,
+                    observation_confidence=COALESCE(
+                        excluded.observation_confidence,
+                        editor_elements.observation_confidence
+                    ),
+                    observation_source=COALESCE(
+                        excluded.observation_source, editor_elements.observation_source
+                    ),
+                    evidence_json=excluded.evidence_json,
+                    verification_json=excluded.verification_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    figure_id,
+                    element_id,
+                    kind,
+                    figure_element_id,
+                    expected_bbox.model_dump_json() if expected_bbox else None,
+                    bbox.model_dump_json(),
+                    json.dumps(merged_payload, ensure_ascii=False),
+                    status,
+                    observation_confidence,
+                    observation_source,
+                    json.dumps(merged_evidence, ensure_ascii=False),
+                    json.dumps(merged_verification, ensure_ascii=False),
+                    _now(),
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE element_requirements SET status = ?, updated_at = ?
+                WHERE figure_id = ? AND logical_element_id = ?
+                """,
+                (status, _now(), figure_id, element_id),
+            )
+
+    def get_editor_element(
+        self,
+        figure_id: str,
+        element_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT element_id, kind, figure_element_id, expected_bbox_json,
+                       bbox_json, payload_json, status, observation_confidence,
+                       observation_source, evidence_json, verification_json, updated_at
+                FROM editor_elements WHERE figure_id = ? AND element_id = ?
+                """,
+                (figure_id, element_id),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["bbox"] = json.loads(item.pop("bbox_json"))
+        item["expected_bbox"] = (
+            json.loads(item.pop("expected_bbox_json"))
+            if item["expected_bbox_json"]
+            else None
+        )
+        item["payload"] = json.loads(item.pop("payload_json"))
+        item["evidence_refs"] = json.loads(item.pop("evidence_json"))
+        item["verification"] = json.loads(item.pop("verification_json"))
+        return item
+
+    def list_editor_elements(
+        self,
+        figure_id: str,
+        *,
+        kind: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = (
+            """
+            SELECT element_id, kind, figure_element_id, expected_bbox_json,
+                   bbox_json, payload_json, status, observation_confidence,
+                   observation_source, evidence_json, verification_json, updated_at
+            FROM editor_elements WHERE figure_id = ?
+            """
+        )
+        parameters: tuple[Any, ...] = (figure_id,)
+        if kind is not None:
+            query += " AND kind = ?"
+            parameters = (figure_id, kind)
+        query += " ORDER BY element_id"
+        with self.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["bbox"] = json.loads(item.pop("bbox_json"))
+            item["expected_bbox"] = (
+                json.loads(item.pop("expected_bbox_json"))
+                if item["expected_bbox_json"]
+                else None
+            )
+            item["payload"] = json.loads(item.pop("payload_json"))
+            item["evidence_refs"] = json.loads(item.pop("evidence_json"))
+            item["verification"] = json.loads(item.pop("verification_json"))
+            results.append(item)
+        return results
+
+    def list_element_requirements(
+        self,
+        figure_id: str,
+        *,
+        kind: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT logical_element_id, kind, scientific_role, requirement_json, "
+            "status, updated_at FROM element_requirements WHERE figure_id = ?"
+        )
+        parameters: tuple[Any, ...] = (figure_id,)
+        if kind is not None:
+            query += " AND kind = ?"
+            parameters = (figure_id, kind)
+        query += " ORDER BY kind, logical_element_id"
+        with self.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["requirement"] = json.loads(item.pop("requirement_json"))
+            results.append(item)
+        return results
+
+    def update_element_requirement_status(
+        self,
+        figure_id: str,
+        logical_element_id: str,
+        status: str,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE element_requirements SET status = ?, updated_at = ?
+                WHERE figure_id = ? AND logical_element_id = ?
+                """,
+                (status, _now(), figure_id, logical_element_id),
+            )
+
     def add_audit_event(
         self,
         event_type: str,
@@ -572,6 +1048,30 @@ class FigureDatabase:
                     _now(),
                 ),
             )
+
+    def list_audit_events(
+        self,
+        *,
+        figure_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM audit_events WHERE 1 = 1"
+        parameters: list[Any] = []
+        if figure_id is not None:
+            query += " AND figure_id = ?"
+            parameters.append(figure_id)
+        if run_id is not None:
+            query += " AND run_id = ?"
+            parameters.append(run_id)
+        query += " ORDER BY id"
+        with self.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            results.append(item)
+        return results
 
     def set_status(self, figure_id: str, status: FigureStatus) -> None:
         with self.connect() as connection:

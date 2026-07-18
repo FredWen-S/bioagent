@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>BioRender-Compatible GUI Fixture</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px Arial, sans-serif; background: #f5f7fa; color: #172033; }
+    #toolbar {
+      position: fixed; left: 320px; top: 12px; width: 1000px; height: 50px;
+      display: flex; gap: 6px; align-items: center; padding: 6px 10px;
+      background: white; border: 1px solid #cdd5df; border-radius: 6px;
+    }
+    button { height: 34px; padding: 0 10px; border: 1px solid #aab6c5; background: white; }
+    #save-status { margin-left: auto; color: #19724b; font-weight: 600; }
+    #sidebar {
+      position: fixed; left: 10px; top: 12px; width: 290px; height: 900px;
+      padding: 12px; background: white; border: 1px solid #cdd5df; border-radius: 6px;
+    }
+    #asset-search { width: 100%; height: 38px; padding: 8px; margin-bottom: 10px; }
+    #results { height: 825px; overflow: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .asset-card {
+      height: 105px; padding: 8px; border: 1px solid #9badc1; border-radius: 5px;
+      background: #fbfdff; cursor: grab; user-select: none; text-align: center;
+    }
+    .asset-card svg { display: block; width: 52px; height: 52px; margin: 2px auto 5px; }
+    #canvas {
+      position: fixed; left: 320px; top: 80px; width: 1000px; height: 700px;
+      overflow: hidden; background: white; border: 2px solid #93a2b4;
+    }
+    .canvas-element {
+      position: absolute; user-select: none; cursor: move;
+    }
+    .asset {
+      width: 80px; height: 80px; border: 3px solid #2357b5; border-radius: 50%;
+      background: #8cb8ff; z-index: 2;
+    }
+    .asset::after {
+      content: attr(data-concept); position: absolute; left: 5px; right: 5px; top: 28px;
+      text-align: center; font-size: 10px; color: #102752; overflow: hidden;
+    }
+    .label {
+      min-width: 50px; height: 30px; padding: 6px 8px; white-space: nowrap;
+      background: #fffef5; border: 1px solid transparent; color: #172033; z-index: 2;
+    }
+    .connector {
+      height: 5px; background: #25364d; transform-origin: 0 50%; z-index: 0;
+      pointer-events: none;
+    }
+    .connector[data-connector-type="arrow"]::after {
+      content: ""; position: absolute; right: -1px; top: -5px;
+      border-left: 12px solid #25364d; border-top: 7px solid transparent;
+      border-bottom: 7px solid transparent;
+    }
+    .connector[data-connector-type="t_bar"]::after,
+    .connector[data-connector-type="blocking_line"]::after {
+      content: ""; position: absolute; right: 0; top: -8px; width: 4px; height: 20px;
+      background: #25364d;
+    }
+    .canvas-element[data-selected="true"] { outline: 2px solid #f28c28; z-index: 5; }
+    .resize-handle, .rotate-handle { display: none; position: absolute; background: #f28c28; }
+    .canvas-element[data-selected="true"] > .resize-handle,
+    .canvas-element[data-selected="true"] > .rotate-handle { display: block; }
+    .resize-handle {
+      width: 12px; height: 12px; right: -7px; bottom: -7px; cursor: nwse-resize;
+    }
+    .rotate-handle {
+      width: 12px; height: 12px; left: calc(50% - 6px); top: -27px;
+      border-radius: 50%; cursor: crosshair;
+    }
+    .text-editor { position: absolute; z-index: 20; height: 32px; border: 2px solid #2357b5; }
+    #ai-button { color: #8d2f91; }
+    #ungroup { display: none; }
+    .modal {
+      position: fixed; left: 500px; top: 250px; width: 400px; padding: 25px;
+      background: white; border: 3px solid #b22424; z-index: 100;
+    }
+  </style>
+</head>
+<body>
+  <aside id="sidebar" data-testid="library-panel">
+    <input id="asset-search" role="searchbox" aria-label="Search assets"
+           placeholder="Search assets">
+    <div id="results" role="listbox" data-testid="search-results"></div>
+  </aside>
+
+  <div id="toolbar">
+    <button aria-label="Text" data-testid="text-tool">Text</button>
+    <button aria-label="Arrow" data-testid="arrow-tool">Arrow</button>
+    <button aria-label="Line" data-testid="line-tool">Line</button>
+    <button aria-label="Inhibition" data-testid="inhibition-tool">Inhibition</button>
+    <button aria-label="Group" data-testid="group-elements">Group</button>
+    <button id="ungroup" aria-label="Ungroup">Ungroup</button>
+    <button aria-label="Align Middle">Align Middle</button>
+    <button aria-label="Distribute Horizontally">Distribute Horizontally</button>
+    <button aria-label="Distribute Vertically">Distribute Vertically</button>
+    <button id="ai-button" aria-label="BioRender AI Generate">BioRender AI Generate</button>
+    <span id="save-status" data-testid="save-status">All changes saved</span>
+  </div>
+
+  <main id="canvas" data-testid="canvas-container" aria-label="Figure canvas"></main>
+
+  <script>
+    const assets = [
+      "T cell", "CD8 T cell", "Tumor cell", "Cancer cell", "PD-1 receptor",
+      "PD-L1 ligand", "Anti-PD-1 antibody", "Antibody", "Protein", "Cell"
+    ];
+    const results = document.querySelector("#results");
+    const search = document.querySelector("#asset-search");
+    const canvas = document.querySelector("#canvas");
+    const saveStatus = document.querySelector("#save-status");
+    let mode = null;
+    let draggingCard = null;
+    let moving = null;
+    let resizing = null;
+    let rotating = null;
+    let connectorSource = null;
+    const selected = new Set();
+    let objectCounter = 0;
+    let groupCounter = 0;
+
+    function markDirty() {
+      saveStatus.textContent = "Saving...";
+      window.setTimeout(() => { saveStatus.textContent = "All changes saved"; }, 80);
+    }
+
+    function renderResults(query = "") {
+      const normalized = query.trim().toLowerCase();
+      const matches = assets.filter((name) =>
+        !normalized || name.toLowerCase().includes(normalized) ||
+        normalized.includes(name.toLowerCase())
+      );
+      results.replaceChildren();
+      for (const name of matches) {
+        const card = document.createElement("div");
+        card.className = "asset-card";
+        card.draggable = true;
+        card.dataset.testid = "asset-card-" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        card.dataset.concept = name;
+        card.innerHTML =
+          '<svg viewBox="0 0 60 60" aria-hidden="true">' +
+          '<circle cx="30" cy="30" r="25" fill="#8cb8ff" stroke="#2357b5" stroke-width="4"/>' +
+          '</svg><span>' + name + '</span>';
+        card.addEventListener("mousedown", (event) => {
+          draggingCard = card;
+          event.preventDefault();
+        });
+        card.addEventListener("dragstart", (event) => event.preventDefault());
+        results.append(card);
+      }
+    }
+
+    function setSelected(element, additive = false) {
+      if (!additive) {
+        for (const item of selected) item.dataset.selected = "false";
+        selected.clear();
+      }
+      selected.add(element);
+      element.dataset.selected = "true";
+    }
+
+    function clearSelection() {
+      for (const item of selected) item.dataset.selected = "false";
+      selected.clear();
+      document.querySelector("#ungroup").style.display = "none";
+    }
+
+    function attachHandles(element) {
+      if (element.classList.contains("connector")) return;
+      const resize = document.createElement("span");
+      resize.className = "resize-handle";
+      resize.dataset.testid = "resize-handle-bottom-right";
+      resize.setAttribute("aria-label", "Resize");
+      resize.addEventListener("mousedown", (event) => {
+        resizing = {
+          element,
+          startX: event.clientX,
+          startY: event.clientY,
+          width: element.offsetWidth,
+          height: element.offsetHeight
+        };
+        event.stopPropagation();
+        event.preventDefault();
+      });
+      const rotate = document.createElement("span");
+      rotate.className = "rotate-handle";
+      rotate.dataset.testid = "rotate-handle";
+      rotate.setAttribute("aria-label", "Rotate");
+      rotate.addEventListener("mousedown", (event) => {
+        rotating = { element };
+        event.stopPropagation();
+        event.preventDefault();
+      });
+      element.append(resize, rotate);
+    }
+
+    function attachElementEvents(element) {
+      element.addEventListener("click", (event) => {
+        setSelected(element, event.shiftKey);
+        event.stopPropagation();
+      });
+      element.addEventListener("mousedown", (event) => {
+        if (event.target.classList.contains("resize-handle") ||
+            event.target.classList.contains("rotate-handle")) return;
+        if (mode && ["arrow", "line", "t_bar", "blocking_line"].includes(mode)) {
+          connectorSource = element;
+          event.stopPropagation();
+          event.preventDefault();
+          return;
+        }
+        moving = {
+          element,
+          offsetX: event.clientX - element.getBoundingClientRect().left,
+          offsetY: event.clientY - element.getBoundingClientRect().top,
+          startX: event.clientX,
+          startY: event.clientY,
+          groupMembers: element.dataset.groupId
+            ? Array.from(document.querySelectorAll(
+                '[data-group-id="' + element.dataset.groupId + '"]'
+              )).map((member) => ({
+                element: member,
+                left: member.offsetLeft,
+                top: member.offsetTop
+              }))
+            : []
+        };
+        setSelected(element, event.shiftKey);
+        event.stopPropagation();
+        event.preventDefault();
+      });
+      if (element.classList.contains("label")) {
+        element.addEventListener("dblclick", (event) => {
+          editLabel(element);
+          event.stopPropagation();
+        });
+      }
+    }
+
+    function createAsset(concept, clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      const element = document.createElement("div");
+      element.className = "canvas-element asset";
+      element.dataset.testid = "canvas-element-asset";
+      element.dataset.concept = concept;
+      element.dataset.selected = "true";
+      element.dataset.rotation = "0";
+      element.style.left = Math.max(0, Math.min(rect.width - 80, clientX - rect.left - 40)) + "px";
+      element.style.top = Math.max(0, Math.min(rect.height - 80, clientY - rect.top - 40)) + "px";
+      attachHandles(element);
+      attachElementEvents(element);
+      canvas.append(element);
+      setSelected(element);
+      objectCounter += 1;
+      markDirty();
+      return element;
+    }
+
+    function createLabelEditor(clientX, clientY, existing = null) {
+      const rect = canvas.getBoundingClientRect();
+      const editor = document.createElement("textarea");
+      editor.className = "text-editor";
+      editor.dataset.testid = "text-editor";
+      editor.style.left = (existing ? existing.offsetLeft : clientX - rect.left) + "px";
+      editor.style.top = (existing ? existing.offsetTop : clientY - rect.top) + "px";
+      editor.style.width = (existing ? Math.max(80, existing.offsetWidth) : 120) + "px";
+      editor.value = existing ? existing.dataset.labelText || existing.textContent : "";
+      if (existing) existing.style.display = "none";
+      editor.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        const text = editor.value;
+        const label = existing || document.createElement("div");
+        label.className = "canvas-element label";
+        label.dataset.testid = "canvas-element-label";
+        label.dataset.labelText = text;
+        label.dataset.selected = "true";
+        label.textContent = text;
+        label.style.display = "block";
+        label.style.left = editor.style.left;
+        label.style.top = editor.style.top;
+        label.style.width = Math.max(50, text.length * 9 + 16) + "px";
+        if (!label.querySelector(".resize-handle")) attachHandles(label);
+        if (!existing) {
+          attachElementEvents(label);
+          canvas.append(label);
+          objectCounter += 1;
+        }
+        editor.remove();
+        setSelected(label);
+        mode = null;
+        markDirty();
+      });
+      canvas.append(editor);
+      editor.focus();
+    }
+
+    function editLabel(label) {
+      createLabelEditor(0, 0, label);
+    }
+
+    function createConnector(source, target, type) {
+      const canvasRect = canvas.getBoundingClientRect();
+      const sourceRect = source.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      let x1 = sourceRect.left + sourceRect.width / 2 - canvasRect.left;
+      const y1 = sourceRect.top + sourceRect.height / 2 - canvasRect.top;
+      let x2 = targetRect.left + targetRect.width / 2 - canvasRect.left;
+      const y2 = targetRect.top + targetRect.height / 2 - canvasRect.top;
+      if (Math.abs(y2 - y1) > Math.abs(x2 - x1)) {
+        x1 = sourceRect.right - canvasRect.left - 3;
+        x2 = targetRect.right - canvasRect.left - 3;
+      }
+      const distance = Math.hypot(x2 - x1, y2 - y1);
+      const angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+      const connector = document.createElement("div");
+      connector.className = "canvas-element connector";
+      connector.dataset.testid = "canvas-element-connector";
+      connector.dataset.connectorType = type;
+      connector.dataset.selected = "true";
+      connector.style.left = x1 + "px";
+      connector.style.top = y1 + "px";
+      connector.style.width = distance + "px";
+      connector.style.transform = "rotate(" + angle + "deg)";
+      attachElementEvents(connector);
+      canvas.append(connector);
+      setSelected(connector);
+      objectCounter += 1;
+      markDirty();
+      return connector;
+    }
+
+    search.addEventListener("input", () => renderResults(search.value));
+    search.addEventListener("keydown", () => renderResults(search.value));
+
+    document.querySelector('[aria-label="Text"]').addEventListener("click", () => { mode = "text"; });
+    document.querySelector('[aria-label="Arrow"]').addEventListener("click", () => { mode = "arrow"; });
+    document.querySelector('[aria-label="Line"]').addEventListener("click", () => { mode = "line"; });
+    document.querySelector('[aria-label="Inhibition"]').addEventListener("click", () => { mode = "t_bar"; });
+
+    canvas.addEventListener("click", (event) => {
+      if (event.target !== canvas) return;
+      if (mode === "text") {
+        createLabelEditor(event.clientX, event.clientY);
+        return;
+      }
+      clearSelection();
+    });
+
+    document.addEventListener("mousemove", (event) => {
+      const canvasRect = canvas.getBoundingClientRect();
+      if (moving) {
+        if (moving.groupMembers.length > 1) {
+          const dx = event.clientX - moving.startX;
+          const dy = event.clientY - moving.startY;
+          for (const member of moving.groupMembers) {
+            member.element.style.left = Math.max(
+              0,
+              Math.min(canvasRect.width - member.element.offsetWidth, member.left + dx)
+            ) + "px";
+            member.element.style.top = Math.max(
+              0,
+              Math.min(canvasRect.height - member.element.offsetHeight, member.top + dy)
+            ) + "px";
+          }
+        } else {
+          const element = moving.element;
+          element.style.left = Math.max(
+            0,
+            Math.min(canvasRect.width - element.offsetWidth, event.clientX - canvasRect.left - moving.offsetX)
+          ) + "px";
+          element.style.top = Math.max(
+            0,
+            Math.min(canvasRect.height - element.offsetHeight, event.clientY - canvasRect.top - moving.offsetY)
+          ) + "px";
+        }
+      }
+      if (resizing) {
+        resizing.element.style.width = Math.max(30, resizing.width + event.clientX - resizing.startX) + "px";
+        resizing.element.style.height = Math.max(24, resizing.height + event.clientY - resizing.startY) + "px";
+      }
+      if (rotating) {
+        const rect = rotating.element.getBoundingClientRect();
+        const angle = Math.atan2(
+          event.clientY - (rect.top + rect.height / 2),
+          event.clientX - (rect.left + rect.width / 2)
+        ) * 180 / Math.PI + 90;
+        rotating.element.dataset.rotation = String(angle);
+        rotating.element.style.transform = "rotate(" + angle + "deg)";
+      }
+    });
+
+    document.addEventListener("mouseup", (event) => {
+      const canvasRect = canvas.getBoundingClientRect();
+      const insideCanvas = event.clientX >= canvasRect.left && event.clientX <= canvasRect.right &&
+        event.clientY >= canvasRect.top && event.clientY <= canvasRect.bottom;
+      if (draggingCard && insideCanvas) {
+        createAsset(draggingCard.dataset.concept, event.clientX, event.clientY);
+      }
+      if (connectorSource) {
+        const target = event.target.closest && event.target.closest(".canvas-element.asset");
+        if (target && target !== connectorSource) {
+          createConnector(connectorSource, target, mode || "line");
+          mode = null;
+        }
+      }
+      if (moving || resizing || rotating) markDirty();
+      draggingCard = null;
+      connectorSource = null;
+      moving = null;
+      resizing = null;
+      rotating = null;
+    });
+
+    document.querySelector('[aria-label="Group"]').addEventListener("click", () => {
+      if (selected.size < 2) return;
+      const groupId = "fixture-group-" + (++groupCounter);
+      for (const element of selected) element.dataset.groupId = groupId;
+      document.querySelector("#ungroup").style.display = "inline-block";
+      markDirty();
+    });
+
+    document.querySelector('[aria-label="Align Middle"]').addEventListener("click", () => {
+      if (selected.size < 2) return;
+      const elements = Array.from(selected);
+      const middle = elements.reduce(
+        (sum, element) => sum + element.offsetTop + element.offsetHeight / 2,
+        0
+      ) / elements.length;
+      for (const element of elements) {
+        element.style.top = (middle - element.offsetHeight / 2) + "px";
+      }
+      markDirty();
+    });
+
+    document.querySelector('[aria-label="Distribute Horizontally"]').addEventListener("click", () => {
+      if (selected.size < 3) return;
+      const elements = Array.from(selected).sort((a, b) => a.offsetLeft - b.offsetLeft);
+      const first = elements[0].offsetLeft;
+      const last = elements[elements.length - 1].offsetLeft;
+      const step = (last - first) / (elements.length - 1);
+      elements.forEach((element, index) => { element.style.left = (first + step * index) + "px"; });
+      markDirty();
+    });
+
+    document.querySelector('[aria-label="Distribute Vertically"]').addEventListener("click", () => {
+      if (selected.size < 3) return;
+      const elements = Array.from(selected).sort((a, b) => a.offsetTop - b.offsetTop);
+      const first = elements[0].offsetTop;
+      const last = elements[elements.length - 1].offsetTop;
+      const step = (last - first) / (elements.length - 1);
+      elements.forEach((element, index) => { element.style.top = (first + step * index) + "px"; });
+      markDirty();
+    });
+
+    document.querySelector("#ai-button").addEventListener("click", () => {
+      const dialog = document.createElement("div");
+      dialog.className = "modal";
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.textContent = "Use 1 AI credit to Generate Figure?";
+      document.body.append(dialog);
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !document.querySelector(".text-editor")) {
+        mode = null;
+        connectorSource = null;
+      }
+    });
+
+    renderResults();
+  </script>
+</body>
+</html>

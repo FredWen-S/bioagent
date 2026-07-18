@@ -100,7 +100,7 @@ class FigureSpec(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
 
     @model_validator(mode="after")
-    def validate_graph(self) -> "FigureSpec":
+    def validate_graph(self) -> FigureSpec:
         entity_ids = [entity.id for entity in self.entities]
         if len(entity_ids) != len(set(entity_ids)):
             raise ValueError("entity ids must be unique")

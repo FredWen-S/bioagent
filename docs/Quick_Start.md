@@ -1,0 +1,117 @@
+# BioRender GUI Agent Quick Start
+
+目标：使用 BioRender 普通编辑器完成科研绘图，**不调用 BioRender AI Generate、
+Create with AI、AI Edit，也不消耗 AI credits**。
+
+> 已通过本地兼容编辑器上的真实 Chromium 回归；真实 BioRender 完整 Figure 仍需用户在
+> 可丢弃空白 Figure 上人工验收。
+
+## 1. 安装
+
+```powershell
+cd C:\bioagent
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev,browser]"
+playwright install chromium
+```
+
+## 2. Dry Run
+
+```powershell
+python -m app.cli demo
+```
+
+此命令只在本地生成计划、SQLite 状态和证据，不打开 BioRender。
+
+## 3. 人工登录
+
+```powershell
+python -m app.cli browser-login
+```
+
+账号、密码和 MFA 必须由用户亲自输入。准备一个可丢弃空白 Figure 并复制完整 URL。
+
+## 4. 校准
+
+```powershell
+$BlankFigureUrl = Read-Host "请输入空白 Figure 完整 URL"
+python -m app.cli calibrate-ui `
+  --editor-url $BlankFigureUrl `
+  --confirm-live
+```
+
+## 5. 先验证单素材
+
+只搜索、不修改画布：
+
+```powershell
+python -m app.cli live-search-asset `
+  --editor-url $BlankFigureUrl `
+  --query "T cell" `
+  --confirm-live
+```
+
+搜索并拖入一个普通素材：
+
+```powershell
+python -m app.cli phase0-search-drag `
+  --editor-url $BlankFigureUrl `
+  --query "T cell" `
+  --confirm-live
+```
+
+## 6. 执行完整 Figure
+
+内置 PD-1/PD-L1 Figure：
+
+```powershell
+python -m app.cli live-figure `
+  --editor-url $BlankFigureUrl `
+  --confirm-live
+```
+
+明确流程：
+
+```powershell
+python -m app.cli live-figure `
+  --request "T cell → Tumor cell → Antibody" `
+  --editor-url $BlankFigureUrl `
+  --confirm-live
+```
+
+支持普通素材搜索/拖拽、Move、Resize、可用时 Rotate、Label、Connector、Group、Align、
+Distribute、截图验证和 BioRender 自动保存状态观察。
+
+## 7. 中断恢复
+
+```powershell
+python -m app.cli resume-live-figure `
+  --run-id "<figure_id>" `
+  --confirm-live
+```
+
+恢复会先观察现场，不会盲目重复插入。无法确认时返回 `paused_reconciliation`。
+
+只读检查元素与最终证据：
+
+```powershell
+python -m app.cli inspect-elements --run-id "<figure_id>"
+python -m app.cli verify-live-figure --run-id "<figure_id>"
+```
+
+## 8. 安全结果
+
+- `awaiting_confirmation`：自动步骤已有证据，等待用户检查真实画布；
+- `unknown`：证据不足，停止；
+- `blocked_by_policy`：检测到 AI、credits、购买或其他禁止上下文，已停止并保存证据。
+
+完整 Live 证据：
+
+```text
+C:\bioagent\output\playwright\figures\<figure_id>\
+```
+
+完整 PD-1 计划包含 94 个动作、9 个素材、9 个 Label、5 个 Connector 和 9 个 Group。
+元素合同见 [Element_Capability_Matrix.md](Element_Capability_Matrix.md)，真实网站必须按
+[Real_BioRender_Acceptance.md](Real_BioRender_Acceptance.md) 从 L0 逐级验收。

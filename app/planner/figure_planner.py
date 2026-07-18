@@ -30,7 +30,8 @@ class ScientificFigurePlanner:
             return self._plan_explicit_flow(requirement, figure_id)
         raise UnsupportedScientificRequest(
             "The deterministic MVP only plans the bundled PD-1/PD-L1 mechanism or an explicit "
-            "A -> B -> C flow. Provide a FigureSpec or configure an LLM planner for other mechanisms."
+            "A -> B -> C flow. Provide a FigureSpec or configure an LLM planner "
+            "for other mechanisms."
         )
 
     @staticmethod
@@ -49,7 +50,13 @@ class ScientificFigurePlanner:
         before = "without_treatment"
         after = "anti_pd1_treatment"
         entities = [
-            Entity(id="t_cell_before", concept="T cell", category="cell", label="T cell", region_id=before),
+            Entity(
+                id="t_cell_before",
+                concept="T cell",
+                category="cell",
+                label="T cell",
+                region_id=before,
+            ),
             Entity(
                 id="tumor_cell_before",
                 concept="Tumor cell",
@@ -71,7 +78,13 @@ class ScientificFigurePlanner:
                 label="PD-L1",
                 region_id=before,
             ),
-            Entity(id="t_cell_after", concept="T cell", category="cell", label="T cell", region_id=after),
+            Entity(
+                id="t_cell_after",
+                concept="T cell",
+                category="cell",
+                label="T cell",
+                region_id=after,
+            ),
             Entity(
                 id="tumor_cell_after",
                 concept="Tumor cell",
@@ -152,7 +165,8 @@ class ScientificFigurePlanner:
             required_concepts=["T cell", "Tumor cell", "PD-1", "PD-L1", "Anti-PD-1"],
             scientific_assumptions=[
                 "The request explicitly states PD-1/PD-L1-mediated T-cell inhibition.",
-                "The request explicitly states restoration of tumor killing after anti-PD-1 treatment.",
+                "The request explicitly states restoration of tumor killing after "
+                "anti-PD-1 treatment.",
             ],
         )
 
@@ -164,7 +178,9 @@ class ScientificFigurePlanner:
         ]
         parts = [part for part in parts if part]
         if not 2 <= len(parts) <= 15:
-            raise UnsupportedScientificRequest("an explicit flow must contain between 2 and 15 nodes")
+            raise UnsupportedScientificRequest(
+                "an explicit flow must contain between 2 and 15 nodes"
+            )
         entities = [
             Entity(
                 id=f"step_{index + 1}",
@@ -192,5 +208,7 @@ class ScientificFigurePlanner:
             entities=entities,
             relations=relations,
             required_concepts=[entity.concept for entity in entities],
-            scientific_assumptions=["Relations were copied from the user's explicit arrow sequence."],
+            scientific_assumptions=[
+                "Relations were copied from the user's explicit arrow sequence."
+            ],
         )

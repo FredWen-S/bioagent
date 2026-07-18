@@ -83,6 +83,9 @@ class AssetCandidateRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate_id: str
+    accessible_name: str = ""
+    dom_fingerprint: str
+    thumbnail_fingerprint: str | None = None
     ordinal: int = Field(ge=0)
     text: str
     bbox: BoundingBox

@@ -46,7 +46,28 @@ class SafeAssetSearch:
         self.evidence_dir = evidence_dir
         self.policy = policy or BioRenderPolicyGuard()
 
-    def search(self, query: str, run_id: str) -> SearchOutcome:
+    def search(
+        self,
+        query: str,
+        run_id: str,
+        *,
+        max_attempts: int = 2,
+    ) -> SearchOutcome:
+        if not 1 <= max_attempts <= 3:
+            raise ValueError("max_attempts must be between 1 and 3")
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._search_once(query, run_id, attempt=attempt)
+            except (SearchNoResult, CandidateIdentityUnclear, UiLayoutChanged) as error:
+                last_error = error
+                if attempt >= max_attempts:
+                    raise
+                self.page.wait_for_timeout(600 * attempt)
+        assert last_error is not None
+        raise last_error
+
+    def _search_once(self, query: str, run_id: str, *, attempt: int) -> SearchOutcome:
         self.policy.assert_page_safe(self.page)
         self.policy.assert_query_allowed(query)
         search = resolve_first_visible(self.page, SEARCH_INPUT_LOCATORS)
@@ -55,6 +76,10 @@ class SafeAssetSearch:
         self.policy.assert_target_allowed(search.locator)
         search.locator.click()
         search.locator.fill(query)
+        try:
+            search.locator.press("Enter")
+        except Exception:
+            pass
 
         results, candidate_locator = self._wait_for_stable_results()
         self.policy.assert_page_safe(self.page)
@@ -64,8 +89,8 @@ class SafeAssetSearch:
 
         run_dir = self.evidence_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        screenshot_path = run_dir / "search-results-full.png"
-        results_path = run_dir / "search-results-region.png"
+        screenshot_path = run_dir / f"search-results-full-attempt-{attempt}.png"
+        results_path = run_dir / f"search-results-region-attempt-{attempt}.png"
         self.page.screenshot(path=str(screenshot_path), full_page=True)
         results.locator.screenshot(path=str(results_path))
 
@@ -174,7 +199,9 @@ class SafeAssetSearch:
             rejected.append("drag origin is not explicitly draggable")
 
         data_testid = locator.get_attribute("data-testid") or ""
-        known_asset_card = "asset" in data_testid.casefold() or "search-result" in data_testid.casefold()
+        known_asset_card = (
+            "asset" in data_testid.casefold() or "search-result" in data_testid.casefold()
+        )
         try:
             has_thumbnail = locator.locator("img, svg, canvas").count() > 0
         except Exception:
@@ -190,10 +217,35 @@ class SafeAssetSearch:
         except Exception as error:
             rejected.append(str(error))
 
-        fingerprint_text = f"{text}|{data_testid}|{query.casefold()}"
-        candidate_id = "candidate_" + hashlib.sha256(
+        accessible_name = ""
+        for attribute in ("aria-label", "title", "data-label"):
+            try:
+                value = locator.get_attribute(attribute) or ""
+            except Exception:
+                value = ""
+            if value:
+                accessible_name = value.strip()
+                break
+        if not accessible_name:
+            accessible_name = text.split("|")[0].strip()
+        thumbnail_signature = None
+        if has_thumbnail:
+            thumbnail_signature = hashlib.sha256(
+                f"thumbnail|{accessible_name}|{data_testid}".encode()
+            ).hexdigest()[:20]
+        fingerprint_text = "|".join(
+            (
+                accessible_name.casefold(),
+                text.casefold(),
+                data_testid.casefold(),
+                draggable_value,
+                thumbnail_signature or "no-thumbnail",
+            )
+        )
+        dom_fingerprint = hashlib.sha256(
             fingerprint_text.encode("utf-8")
-        ).hexdigest()[:16]
+        ).hexdigest()[:24]
+        candidate_id = f"assetfp_{dom_fingerprint}"
         score = 0.0
         score += 3.0 if draggable else 0
         score += 2.0 if known_asset_card else 0
@@ -202,6 +254,9 @@ class SafeAssetSearch:
         return (
             AssetCandidateRecord(
                 candidate_id=candidate_id,
+                accessible_name=accessible_name[:500],
+                dom_fingerprint=dom_fingerprint,
+                thumbnail_fingerprint=thumbnail_signature,
                 ordinal=ordinal,
                 text=text[:1000],
                 bbox=box,

@@ -1,203 +1,226 @@
 # BioRender GUI Agent MVP
 
-这是一个“先规划、后执行、全程可审计”的 BioRender 网页自动化 MVP。它把科研内容理解、
-结构化 Figure Specification、素材搜索、布局、有限 GUI 动作、SQLite 状态和人工确认分成独立层。
+BioRender GUI Agent 通过 Playwright 模拟真人编辑 BioRender：搜索普通素材、拖入画布、
+调整元素、添加文字和连接线、排版，并观察 BioRender 的自动保存状态。
 
-当前版本默认只做 `dry-run`，不会登录账户、不会点击 BioRender AI、不会导出、发布、共享、删除或
-购买任何内容。真实浏览器模块支持 UI 校准，以及一个固定的单素材闭环：搜索普通 `T cell` 素材、
-保存候选证据、拖入画布、像素观察、持久化状态并停在人工确认。文字和连接器仍未启用。
+项目的硬约束是：**绝不调用 BioRender AI Generate、Create with AI、AI Edit，
+也不确认任何 AI credits、购买或升级操作。** AI 控件会被记录并围栏；动作目标或弹窗命中
+AI、credits、购买、订阅或升级策略时，运行会立即保存截图并返回 `blocked_by_policy`。
 
-## 已实现
+> 当前能力已在本地 BioRender 兼容编辑器上使用真实 Chromium、真实鼠标和键盘事件完成
+> 自动化回归；尚无可公开引用的真实 BioRender 完整 Figure 成功案例。真实网站必须使用
+> 人工登录和可丢弃的空白 Figure 验收，不能把本地测试结果当作线上成功。
 
-- Pydantic v2 严格模型：未知字段、悬空关系、重复 ID、坐标越界会直接拒绝。
-- PD-1/PD-L1 双栏示例，以及用户显式给出的 `A → B → C` 流程。
-- 科学一致性基础检查：必需实体、孤立实体、激活/抑制冲突、明确要求但缺失的阻断或抑制关系。
-- 每个实体最多 5 个 BioRender 搜索词，按标准术语、同义词、上位概念降级。
-- 线性、双栏和中心辐射布局的标准化坐标模型。
-- 只有 9 类允许动作的 GUI Action allow-list；凭证、导出、发布、分享、订阅和 BioRender AI 参数被拒绝。
-- SQLite 表：`figures`、`figure_entities`、`figure_relations`、`gui_actions`、`screenshots`、
-  `verification_results`。
-- 每个动作有超时、重试次数、状态、错误类型和证据路径；中断后从第一个未成功动作恢复。
-- FastAPI、命令行、PD-1 示例与自动化测试。
-- 版本化 BioRender UI Calibration Profile：viewport、搜索框、结果区、画布、弹窗、AI 控件与截图。
-- BioRender AI/AI credits/订阅/购买/模板上下文 denylist，以及每次交互前的页面和目标检查。
-- `expected_bbox` 与 `observed_bbox` 分离；实际位置只允许来自 DOM、Accessibility、截图或其他 Observer。
-- live 动作状态：`planned → executing → executed_unverified → verified/unknown`。
-- 单素材 probe checkpoint 与 reconcile-based recovery，防止 GUI 已生效但数据库未写时重复拖拽。
+## 功能
 
-## 快速开始
+- 打开用户提供的 BioRender Figure；
+- 多关键词普通素材搜索、候选筛选、等待和失败重试；
+- 拖拽、移动、缩放；当前 UI 暴露普通旋转手柄时可旋转，否则安全停止；
+- 添加、编辑、移动和缩放 Label；
+- 添加 Arrow、Line 和 Inhibition Connector；
+- 多元素 Group、Align、Distribute；
+- 执行内置 PD-1/PD-L1 Figure 或明确的 `A → B → C` 流程；
+- 观察元素数量、位置、尺寸、文字、连接线和自动保存状态；
+- 为每个逻辑元素保存弱身份指纹、实际 bbox、置信度、验证结果和证据；
+- SQLite Checkpoint、截图证据和 reconcile-based 恢复，不盲目重放已生效动作；
+- Dry Run、CLI、FastAPI 和人工最终确认。
 
-现有环境已经装有 FastAPI 和 Pydantic 时，可直接运行：
+## 安装
+
+要求 Python 3.11+。以下命令适用于 Windows PowerShell：
 
 ```powershell
+cd C:\bioagent
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev,browser]"
+playwright install chromium
+python -m app.cli --help
+```
+
+## 五分钟 Dry Run
+
+```powershell
+cd C:\bioagent
+.\.venv\Scripts\Activate.ps1
 python -m app.cli demo
 ```
 
-输出会包含 Figure ID、9 个实体、5 条关系、动作数和数据库路径。dry-run 的逐动作证据写入
-`runtime/screenshots/<figure_id>/`，SQLite 默认位于 `runtime/agent.db`。
+`demo` 会规划并本地模拟内置 PD-1/PD-L1 Figure，写入 SQLite 和逐动作证据；它不会
+打开 BioRender，也不会修改在线 Figure。正常终点是 `awaiting_confirmation`。
 
-完整开发安装：
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-pytest
-```
-
-规划任意显式流程：
+规划自定义显式流程：
 
 ```powershell
-python -m app.cli plan "Sample → Centrifugation → Supernatant" --output output.json
+python -m app.cli plan "Sample → Centrifugation → Supernatant" `
+  --output C:\bioagent\output.json
 ```
 
-规划附带的 PD-1 示例：
+## Live Mode
 
-```powershell
-python -m app.cli plan examples\pd1_request.txt --output pd1-plan.json
-```
-
-## API
-
-```powershell
-uvicorn app.main:app --reload
-```
-
-主要端点：
-
-- `POST /v1/figures/plan`
-- `POST /v1/figures/{figure_id}/execute-dry-run`
-- `GET /v1/figures/{figure_id}`
-- `POST /v1/figures/{figure_id}/confirm`
-
-示例请求：
-
-```json
-{
-  "request": "制作双栏对比：PD-1/PD-L1 抑制 T 细胞，anti-PD-1 恢复肿瘤杀伤。",
-  "editor_url": "https://app.biorender.com/"
-}
-```
-
-## 真实浏览器 Phase 0
-
-安装可选依赖与 Chromium：
-
-```powershell
-pip install -e ".[browser]"
-playwright install chromium
-```
-
-登录必须由用户手动完成，并保存在项目内的持久化 Profile：
+### 1. 人工登录
 
 ```powershell
 python -m app.cli browser-login
 ```
 
-Agent 不读取、记录或输入密码和 MFA。登录完成后，把一个可丢弃的空白 Figure 完整编辑器 URL
-用于校准。真实执行没有挂到 HTTP API，防止误把未校准的 UI 自动化当作稳定服务。
+用户必须亲自输入账号、密码和 MFA。Agent 不读取或填写凭证。登录完成后关闭浏览器，
+会话保存在本机持久 Chromium Profile 中。
 
-先校准当前 UI：
+### 2. 准备空白 Figure 并校准
+
+不要在重要 Figure 上首次测试。先在 BioRender 中人工创建或打开一个可丢弃空白 Figure，
+复制完整编辑器 URL：
 
 ```powershell
+$BlankFigureUrl = Read-Host "请输入可丢弃空白 Figure 的完整编辑器 URL"
 python -m app.cli calibrate-ui `
-  --editor-url "https://app.biorender.com/<your-blank-figure>" `
+  --editor-url $BlankFigureUrl `
   --confirm-live
 ```
 
-Profile JSON 和截图保存在：
+校准找不到普通搜索区、结果区或画布时会保存证据并停止。
 
-```text
-output/playwright/calibration/<date>/<profile_id>/
-```
+### 3. 执行完整 Figure
 
-搜索、拖拽并验证一个普通素材：
+默认执行内置 PD-1/PD-L1 请求：
 
 ```powershell
-python -m app.cli phase0-search-drag `
-  --editor-url "https://app.biorender.com/<your-blank-figure>" `
+python -m app.cli live-figure `
+  --editor-url $BlankFigureUrl `
+  --confirm-live
+```
+
+也可以执行明确流程：
+
+```powershell
+python -m app.cli live-figure `
+  --request "T cell → Tumor cell → Antibody" `
+  --editor-url $BlankFigureUrl `
+  --confirm-live
+```
+
+`--confirm-live` 是必需安全门，但不会关闭任何策略检查。正常结果是
+`awaiting_confirmation`，表示所有计划动作已有对应 Observer 证据，仍需用户检查真实
+画布和科研表达。
+
+若运行中断，使用原输出中的 Figure ID 恢复：
+
+```powershell
+python -m app.cli resume-live-figure `
+  --run-id "<figure_id>" `
+  --confirm-live
+```
+
+恢复会先协调当前画布：已存在则记录并跳过；可信地不存在才允许一次重试；无法判断或
+UI Profile 变化则进入 `paused_reconciliation`，不会重复插入。
+
+### 单素材安全探针
+
+只搜索普通素材、不修改画布：
+
+```powershell
+python -m app.cli live-search-asset `
+  --editor-url $BlankFigureUrl `
   --query "T cell" `
   --confirm-live
 ```
 
-证据保存在：
-
-```text
-output/playwright/probes/<run_id>/
-```
-
-正常结果为 `awaiting_confirmation`，不会自动导出、共享、删除或修改账户。
-
-如果运行在拖拽后、数据库确认前中断，使用输出中的 Run ID 恢复：
+验证搜索和拖拽：
 
 ```powershell
 python -m app.cli phase0-search-drag `
-  --resume-run "<probe_run_id>" `
+  --editor-url $BlankFigureUrl `
+  --query "T cell" `
   --confirm-live
 ```
 
-恢复逻辑会重新校准和截图：
+## 状态含义
 
-```text
-素材已经存在 → 记录 verified，不重放拖拽
-素材可信地不存在 → 允许一次安全重试
-无法判断或 UI Profile 变化 → unknown，暂停人工检查
-```
+| 状态 | 含义 |
+|---|---|
+| `verified` | Observer 已确认该动作要求的像素、DOM、几何或可访问性证据 |
+| `executed_unverified` | 指令可能已发送，但不能证明 GUI 结果 |
+| `unknown` | 现场有歧义；暂停，不能当作成功 |
+| `blocked_by_policy` | 命中 BioRender AI、AI credits、购买或其他禁止上下文 |
+| `awaiting_confirmation` | 自动步骤完成，等待用户最终检查 |
 
-旧命令仍作为兼容别名，但走同一条可验证链路：
+Playwright 没有抛异常不等于 GUI 成功。最终 Figure 必须确认所有预期 asset、label 和
+connector 的身份、数量与位置，且能观察到 BioRender 保存状态，才能结束自动阶段。
+
+查看单个元素的计划、观察和证据（只读）：
 
 ```powershell
-python -m app.cli phase0-probe `
-  --editor-url "https://app.biorender.com/<your-blank-figure>" `
-  --confirm-live
+python -m app.cli inspect-elements --run-id "<figure_id>"
+python -m app.cli verify-live-figure --run-id "<figure_id>"
 ```
 
-只有明确传入 `--confirm-live` 才会连接 live 编辑器。命令不会自动新建 Figure；用户必须提供已经
-检查过的空白 Figure URL。
+## 安全边界
 
-按 Playwright 的验证流程，每次关键 DOM 变化后都会重新定位关键区域。候选必须位于校准后的结果区，
-明确可拖拽，具有普通素材卡片或缩略图证据，并通过 AI、模板、订阅和购买策略检查。不会默认信任
-第一个结果。
+Agent 不会：
 
-已知 AI 控件会被校准记录并禁止作为交互目标；AI credits、Generate Figure、AI Edit、订阅或购买
-确认弹窗会立即停止运行并保存失败截图。规则不会粗暴禁止普通操作中的单独 `generate` 单词。
+- 调用 BioRender AI Generate、Create with AI、AI Edit 或 AI Assistant；
+- 确认 AI credits、购买、订阅或升级；
+- 自动输入密码或 MFA；
+- 自动导出、分享、发布或删除 Figure；
+- 在恢复时盲目重放已生效的拖拽或插入。
 
-错误结果包含：错误类型、Workflow State、最后动作、截图路径、人工检查建议和是否可安全恢复。
+发现 AI/credits 对话框时应保留失败截图并停止，不应通过修改代码绕过策略。
 
-## 设计边界
-
-确定性规划器不会凭空补全任意复杂机制。除 PD-1 内置验收案例外，用户必须提供明确的箭头流程、
-直接提交合法 FigureSpec，或后续接入返回同一严格 schema 的多模态模型。科学校验只是基础防错，
-不是文献审查，也不证明图中的科研结论真实。
-
-完整 Figure 的视觉验证仍未实现。单素材 probe 只使用拖拽前后画布像素差异，要求变化发生在目标区域；
-无法定位变化时返回 `unknown`，不会把 Playwright 没抛异常当成成功。UI 或素材卡片不满足安全证据时
-也会暂停，而不是退回盲目坐标点击。
-
-## 目录
+## 输出文件
 
 ```text
-app/
-  api/          FastAPI
-  planner/      需求、Figure、素材与布局规划
-  operator/     动作编译、dry-run、Playwright 与 BioRender 校准/Policy/Observer/Recovery
-  verifier/     科学一致性检查
-  workflow/     显式可恢复状态机
-  storage/      SQLite 审计存储
-  schemas/      严格数据契约
-examples/       PD-1 验收请求
-tests/          规划、校验、恢复与证据测试
-runtime/        数据库与持久浏览器会话（运行产物不入库）
-output/playwright/  Calibration 与 live probe 截图证据（运行产物不入库）
+C:\bioagent\runtime\agent.db
+    Figure、动作、元素、Checkpoint 和 Verification 状态
+
+C:\bioagent\runtime\screenshots\<figure_id>\
+    Dry Run 证据
+
+C:\bioagent\output\playwright\calibration\
+    UI Calibration Profile 与截图
+
+C:\bioagent\output\playwright\figures\<figure_id>\
+    完整 Live Figure 的逐动作和最终画布证据
+
+C:\bioagent\output\playwright\probes\<run_id>\
+    单素材 Probe 证据
 ```
+
+浏览器 Profile 和截图可能包含会话或 Figure 信息，不应提交到公共仓库。
+
+## FastAPI
+
+```powershell
+python -m uvicorn app.main:app --reload
+```
+
+HTTP API 只提供规划、Dry Run、状态查询和确认；Live 操作只保留在带
+`--confirm-live` 的 CLI 中。
 
 ## 测试
 
-普通测试使用 Mock Page 和离线像素图片，不访问真实 BioRender：
-
 ```powershell
-pytest
+python -m pytest
 ```
 
-覆盖 AI Policy、普通候选筛选、校准失败、expected/observed 分离、动作状态、Pixel Observer、恢复去重、
-unknown 暂停、SQLite V2 迁移、dry-run 隔离和 `--confirm-live` 安全门。真实 BioRender Probe 只做手工验收。
+测试包含普通单元测试、策略/恢复测试，以及本地 BioRender 兼容页面上的真实 Chromium
+浏览器测试。浏览器测试不是 Mock，但也不是 BioRender 线上验收。
+
+关键回归覆盖：多关键词搜索、拖拽、移动、缩放、旋转、Label、Connector、Group、
+Align、Distribute、元素级恢复去重、策略截图和完整 PD-1 Figure。当前 PD-1 计划为 94 个
+动作，覆盖 9 个素材、9 个 Label、5 个 Connector 和 9 个 Group。
+
+## 已知限制
+
+- 真实 BioRender UI 会变化，Locator 或工具名称不匹配时会安全停止；
+- 旋转只在当前 UI 暴露可观察的普通旋转手柄时执行；
+- Planner 目前只支持内置 PD-1/PD-L1 案例和明确的箭头流程；
+- 科学一致性检查不是文献审查；最终科研正确性必须人工确认；
+- 当前没有已公开验证的真实 BioRender 完整 Figure 成功率或成功截图；
+- 不支持自动导出、分享、删除、购买或无人值守登录。
+
+极简使用说明见 [docs/User_Manual.md](docs/User_Manual.md)，工作原理见
+[docs/How_It_Works.md](docs/How_It_Works.md)，安装环境见
+[docs/Environment_Setup.md](docs/Environment_Setup.md)。
+逐元素合同见 [docs/Element_Capability_Matrix.md](docs/Element_Capability_Matrix.md)，真实站点
+分级验收见 [docs/Real_BioRender_Acceptance.md](docs/Real_BioRender_Acceptance.md)。

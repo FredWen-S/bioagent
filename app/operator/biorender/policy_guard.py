@@ -8,7 +8,6 @@ from app.operator.biorender.locators import INTERACTIVE_SELECTOR, MODAL_SELECTOR
 from app.operator.errors import PolicyBlocked, UnexpectedModal
 from app.schemas.biorender_probe import CalibratedRegion, LocatorEvidence, VisibleModal
 
-
 AI_CONTROL_PATTERNS = (
     re.compile(r"\bbiorender\s+ai\b", re.IGNORECASE),
     re.compile(r"\bcreate\s+(?:a\s+)?(?:figure\s+)?with\s+ai\b", re.IGNORECASE),
@@ -24,7 +23,7 @@ AI_CREDIT_PATTERNS = (
 )
 
 SUBSCRIPTION_PATTERNS = (
-    re.compile(r"\bupgrade\s+(?:now|to|your)\b", re.IGNORECASE),
+    re.compile(r"\bupgrade(?:\s+(?:now|to|your))?\b", re.IGNORECASE),
     re.compile(r"\bsubscribe\b", re.IGNORECASE),
     re.compile(r"\bpurchase\b", re.IGNORECASE),
     re.compile(r"\bunlock\s+(?:premium|this\s+asset|asset)\b", re.IGNORECASE),

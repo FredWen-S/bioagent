@@ -37,5 +37,4 @@ def test_plan_execute_and_read_api(tmp_path: Path) -> None:
 
     record = client.get(f"/v1/figures/{figure_id}")
     assert record.status_code == 200
-    assert len(record.json()["actions"]) == 44
-
+    assert len(record.json()["actions"]) == len(planned.json()["actions"])
