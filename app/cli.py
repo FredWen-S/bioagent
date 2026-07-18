@@ -6,8 +6,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.config import settings
-from app.operator.dry_run import DryRunOperator
 from app.schemas.figure_spec import FigureStatus
+from app.services.figure_execution_service import FigureExecutionService
 from app.storage.database import FigureDatabase
 from app.workflow.engine import WorkflowEngine
 
@@ -22,8 +22,8 @@ def _database(path: str | None) -> FigureDatabase:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    engine = WorkflowEngine(_database(args.database))
-    bundle = engine.plan(_read_request(args.request), editor_url=args.editor_url)
+    service = FigureExecutionService(_database(args.database))
+    bundle = service.plan_prompt(_read_request(args.request), editor_url=args.editor_url)
     payload = bundle.model_dump(mode="json")
     output = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.output:
@@ -36,10 +36,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 def cmd_demo(args: argparse.Namespace) -> int:
     database = _database(args.database)
-    engine = WorkflowEngine(database)
-    request_path = Path(__file__).resolve().parent.parent / "examples" / "pd1_request.txt"
-    bundle = engine.plan(request_path.read_text(encoding="utf-8"))
-    status = engine.execute(bundle.figure_spec.id, DryRunOperator())
+    service = FigureExecutionService(database)
+    bundle = service.plan_prompt(service.pd1_request())
+    status = service.execute_dry_run(bundle.figure_spec.id)
     print(
         json.dumps(
             {
@@ -404,10 +403,8 @@ def cmd_live_figure(args: argparse.Namespace) -> int:
     _require_live_confirmation(args, "Full Figure live workflow")
     if not args.resume_figure and not args.editor_url:
         raise SystemExit("--editor-url is required unless --resume-figure is provided")
-    from app.operator.playwright_live import LivePlaywrightOperator
-
     database = _database(args.database)
-    engine = WorkflowEngine(database)
+    service = FigureExecutionService(database)
     if args.resume_figure:
         figure_id = args.resume_figure
         record = database.get_figure(figure_id)
@@ -421,16 +418,12 @@ def cmd_live_figure(args: argparse.Namespace) -> int:
                 / "examples"
                 / "pd1_request.txt"
             )
-        bundle = engine.plan(
+        bundle = service.plan_prompt(
             _read_request(request_value),
             editor_url=args.editor_url,
         )
         figure_id = bundle.figure_spec.id
-    operator = LivePlaywrightOperator(
-        database=database,
-        headed=True,
-    )
-    status = engine.execute(figure_id, operator)
+    status = service.execute_live_sync(figure_id)
     states = database.action_states(figure_id)
     output = {
         "figure_id": figure_id,
@@ -455,6 +448,16 @@ def cmd_resume_live_figure(args: argparse.Namespace) -> int:
     args.editor_url = None
     args.request = None
     return cmd_live_figure(args)
+
+
+def cmd_web_ui(args: argparse.Namespace) -> int:
+    """Start the loopback-only graphical control panel."""
+    import uvicorn
+
+    url = f"http://127.0.0.1:{args.port}/ui"
+    print(f"BioRender GUI Agent Web UI:\n{url}")
+    uvicorn.run("app.main:app", host="127.0.0.1", port=args.port, reload=False)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -574,6 +577,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Acknowledge that resume may apply minimal repairs to the Figure",
     )
     resume_live.set_defaults(func=cmd_resume_live_figure)
+
+    web_ui = subparsers.add_parser(
+        "web-ui",
+        help="Start the local graphical control panel at http://127.0.0.1:8000/ui",
+    )
+    web_ui.add_argument("--port", type=int, choices=range(1024, 65536), default=8000)
+    web_ui.set_defaults(func=cmd_web_ui)
     return parser
 
 

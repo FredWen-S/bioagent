@@ -558,6 +558,18 @@ class FigureDatabase:
             record[key.removesuffix("_json")] = json.loads(record.pop(key))
         return record
 
+    def list_figures(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 100))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, title, status, created_at, updated_at
+                FROM figures ORDER BY updated_at DESC LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_actions(self, figure_id: str) -> list[GuiAction]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -710,6 +722,43 @@ class FigureDatabase:
                     profile.created_at,
                 ),
             )
+
+    def latest_calibration_profile(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT profile_id, ui_profile_version, status, profile_json,
+                       profile_path, screenshot_path, created_at
+                FROM calibration_profiles ORDER BY created_at DESC LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["profile"] = json.loads(item.pop("profile_json"))
+        return item
+
+    def list_screenshots(self, figure_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, action_id, path, kind, created_at
+                FROM screenshots WHERE figure_id = ? ORDER BY id DESC
+                """,
+                (figure_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_screenshot(self, screenshot_id: int) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, figure_id, action_id, path, kind, created_at
+                FROM screenshots WHERE id = ?
+                """,
+                (screenshot_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def create_probe_run(
         self,
