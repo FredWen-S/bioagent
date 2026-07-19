@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from app.operator.action_planner import GuiActionPlanner
 from app.operator.base import GuiOperator
 from app.operator.errors import AuthenticationRequired, OperatorError, PolicyBlocked
@@ -9,7 +11,7 @@ from app.planner.figure_planner import ScientificFigurePlanner
 from app.planner.layout_planner import LayoutPlanner
 from app.planner.requirement_parser import RequirementParser
 from app.schemas.bundle import PlanningBundle
-from app.schemas.figure_spec import FigureStatus
+from app.schemas.figure_spec import FigureSpec, FigureStatus, Requirement
 from app.schemas.gui_action import ActionStatus, GuiActionResult
 from app.storage.database import FigureDatabase
 from app.verifier.scientific_guard import ScientificValidityGuard
@@ -34,6 +36,16 @@ class WorkflowEngine:
     ) -> PlanningBundle:
         requirement = self.requirement_parser.parse(request_text)
         spec = self.figure_planner.plan(requirement)
+        return self.plan_spec(requirement, spec, editor_url=editor_url)
+
+    def plan_spec(
+        self,
+        requirement: Requirement,
+        spec: FigureSpec,
+        *,
+        editor_url: str = "https://app.biorender.com/",
+    ) -> PlanningBundle:
+        """Compile and persist an already validated scientific input graph."""
         validation = self.guard.validate(spec, requirement)
         assets = self.asset_planner.plan(spec)
         layout = self.layout_planner.plan(spec)
@@ -51,7 +63,13 @@ class WorkflowEngine:
         self.database.save_bundle(bundle)
         return bundle
 
-    def execute(self, figure_id: str, operator: GuiOperator) -> FigureStatus:
+    def execute(
+        self,
+        figure_id: str,
+        operator: GuiOperator,
+        *,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> FigureStatus:
         record = self.database.get_figure(figure_id)
         if record is None:
             raise KeyError(f"unknown figure {figure_id!r}")
@@ -64,6 +82,20 @@ class WorkflowEngine:
         self.database.set_status(figure_id, FigureStatus.EXECUTING)
         try:
             for action in self.database.list_actions(figure_id):
+                if stop_requested is not None and stop_requested():
+                    self.database.add_audit_event(
+                        "safe_stop_requested",
+                        {
+                            "before_action_id": action.id,
+                            "message": "Execution paused safely between GUI actions.",
+                        },
+                        figure_id=figure_id,
+                    )
+                    self.database.set_status(
+                        figure_id,
+                        FigureStatus.PAUSED_APPROVAL,
+                    )
+                    return FigureStatus.PAUSED_APPROVAL
                 state = self.database.action_state(action.id)
                 if state is None:
                     raise KeyError(f"unknown action {action.id!r}")

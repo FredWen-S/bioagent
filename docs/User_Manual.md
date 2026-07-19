@@ -33,7 +33,20 @@ python -m pip install -e ".[dev,browser]"
 playwright install chromium
 ```
 
-## 第一次启动：Dry Run
+## 第一次启动：图形化界面
+
+```powershell
+python -m app.cli web-ui
+```
+
+访问 `http://127.0.0.1:8000/ui`，保持“PD-1 / PD-L1 机制图”和“安全预演”，然后单击
+“开始安全预演”。这不会打开或修改 BioRender。
+
+界面还提供有限自定义图形、人工登录、URL 检查、校准、经确认的真实执行、进度、元素状态、
+真实截图证据、安全停止、Resume 和只读 Verify。它只是现有 Workflow 的可视化入口，不会
+绕过 AI Generate Policy Guard。详见 [Graphical_UI_Guide.md](Graphical_UI_Guide.md)。
+
+## CLI Dry Run
 
 ```powershell
 python -m app.cli demo
@@ -43,6 +56,9 @@ python -m app.cli demo
 修改 BioRender。
 
 ## 第一次 Live 运行
+
+图形化界面用户应选择“真实执行”、输入可丢弃的空白 Figure URL，并主动勾选确认。没有
+URL 或确认时“开始绘制”保持禁用。以下命令提供相同核心 Workflow 的 CLI 入口。
 
 1. 手动登录：
 

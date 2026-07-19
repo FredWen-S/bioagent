@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.playwright-cli/
 .venv/
 dist/
 build/
@@ -12,6 +13,10 @@ runtime/logs/*
 runtime/screenshots/*
 runtime/sessions/*
 runtime/pytest-temp/
+runtime/browser-*/
+runtime/full-pytest-temp-ui/
+runtime/nonbrowser-*/
+runtime/ui-*/
 output/playwright/*
 !runtime/logs/.gitkeep
 !runtime/screenshots/.gitkeep

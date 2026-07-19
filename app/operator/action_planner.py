@@ -32,9 +32,10 @@ class GuiActionPlanner:
 
         def add(action_type: ActionType, arguments: dict, *, screenshot: bool = True) -> None:
             sequence = len(actions)
+            figure_key = spec.id.removeprefix("figure_")
             actions.append(
                 GuiAction(
-                    id=f"action_{sequence:04d}_{action_type.value}",
+                    id=f"action_{figure_key}_{sequence:04d}_{action_type.value}",
                     figure_id=spec.id,
                     sequence=sequence,
                     action=action_type,
