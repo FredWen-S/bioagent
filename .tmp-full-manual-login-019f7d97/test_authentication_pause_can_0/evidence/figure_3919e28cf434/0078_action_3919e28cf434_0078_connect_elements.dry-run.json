@@ -1,0 +1,35 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_3919e28cf434_0078_connect_elements",
+    "figure_id": "figure_3919e28cf434",
+    "sequence": 78,
+    "action": "connect_elements",
+    "arguments": {
+      "relation_id": "pd1_pdl1_binding_before",
+      "logical_connector_id": "pd1_pdl1_binding_before",
+      "source_entity_id": "pd1_before",
+      "target_entity_id": "pdl1_before",
+      "connector_type": "line",
+      "semantic_role": "binding",
+      "direction": "source_to_target",
+      "start_anchor": "center",
+      "end_anchor": "center",
+      "expected_route": "straight",
+      "label": "PD-1 binds PD-L1"
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.05499999999999999,
+      "y": 0.595,
+      "width": 0.41000000000000003,
+      "height": 0.19,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

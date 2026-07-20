@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -17,6 +18,8 @@ from app.schemas.figure_spec import FigureStatus
 from app.services.figure_execution_service import FigureExecutionService, UiServiceError
 from app.storage.database import FigureDatabase
 from app.workflow.engine import WorkflowEngine
+
+logger = logging.getLogger(__name__)
 
 
 class PlanRequest(BaseModel):
@@ -57,11 +60,29 @@ async def handle_ui_service_error(
         "RUN_ALREADY_ACTIVE",
         "RUN_NOT_ACTIVE",
         "BROWSER_BUSY",
+        "BROWSER_PROFILE_IN_USE",
+        "LOGIN_JOB_ALREADY_ACTIVE",
+        "LOGIN_WINDOW_CLOSED",
         "LOGIN_WINDOW_NOT_OPEN",
+        "DRY_RUN_NOT_READY",
+        "DRY_RUN_CONFIRMATION_REQUIRED",
+        "DRY_RUN_TASK_MISMATCH",
+        "PLAN_REQUIRED",
+        "PLAN_TASK_MISMATCH",
+        "PLAN_NOT_EXECUTABLE",
+        "LOGIN_REQUIRED",
+        "BLANK_CANVAS_CONFIRMATION_REQUIRED",
+        "CANVAS_NOT_VERIFIED",
     }:
         status_code = 409
     elif error.error_code == "EVIDENCE_ACCESS_DENIED":
         status_code = 403
+    elif error.error_code in {
+        "CHROMIUM_NOT_INSTALLED",
+        "PLAYWRIGHT_NOT_INSTALLED",
+        "PLAYWRIGHT_LAUNCH_FAILED",
+    }:
+        status_code = 503
     else:
         status_code = 400
     return JSONResponse(
@@ -69,6 +90,7 @@ async def handle_ui_service_error(
         content={
             "error_code": error.error_code,
             "message": str(error),
+            "diagnostic_hint": error.diagnostic_hint,
             "details": error.details,
         },
     )
@@ -94,6 +116,7 @@ async def handle_request_validation(
         content={
             "error_code": "INVALID_REQUEST",
             "message": "提交内容不符合要求，请检查表单。",
+            "diagnostic_hint": "请刷新页面后重试；若仍失败，请检查请求字段。",
             "details": details,
         },
     )
@@ -103,11 +126,13 @@ async def handle_request_validation(
 async def handle_unexpected_ui_error(request: Request, error: Exception) -> JSONResponse:
     if not request.url.path.startswith("/api/ui/"):
         raise error
+    logger.exception("Unhandled UI API error for %s", request.url.path, exc_info=error)
     return JSONResponse(
         status_code=500,
         content={
             "error_code": "INTERNAL_ERROR",
             "message": "服务暂时无法完成请求，请查看本机服务日志。",
+            "diagnostic_hint": "请查看启动 Web UI 的终端日志后重试。",
             "details": None,
         },
     )

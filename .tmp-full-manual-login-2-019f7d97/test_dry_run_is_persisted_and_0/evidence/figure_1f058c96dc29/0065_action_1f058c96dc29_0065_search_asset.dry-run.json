@@ -1,0 +1,27 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_1f058c96dc29_0065_search_asset",
+    "figure_id": "figure_1f058c96dc29",
+    "sequence": 65,
+    "action": "search_asset",
+    "arguments": {
+      "entity_id": "antibody_after",
+      "logical_element_id": "antibody_after",
+      "query": "Anti-PD-1 antibody",
+      "fallback_queries": [
+        "monoclonal antibody",
+        "antibody",
+        "Y antibody"
+      ],
+      "max_queries": 4
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": null
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

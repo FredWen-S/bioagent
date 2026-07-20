@@ -111,9 +111,15 @@ class CustomFigureInput(BaseModel):
 class UiTaskInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["preset", "custom"]
+    mode: Literal["preset", "prompt", "custom"]
     preset_id: Literal["pd1"] | None = None
+    prompt: str | None = Field(default=None, min_length=3, max_length=3000)
     custom: CustomFigureInput | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, value: str | None) -> str | None:
+        return _reject_forbidden(value) if value else None
 
     @model_validator(mode="after")
     def validate_mode_payload(self) -> UiTaskInput:
@@ -121,10 +127,20 @@ class UiTaskInput(BaseModel):
             raise ValueError("当前只支持 PD-1 / PD-L1 预设")
         if self.mode == "preset" and self.custom is not None:
             raise ValueError("预设模式不能同时提交自定义图形")
+        if self.mode == "preset" and self.prompt is not None:
+            raise ValueError("预设模式不能同时提交 Prompt")
+        if self.mode == "prompt" and self.prompt is None:
+            raise ValueError("Prompt 模式需要填写绘图需求")
+        if self.mode == "prompt" and (
+            self.preset_id is not None or self.custom is not None
+        ):
+            raise ValueError("Prompt 模式不能同时提交预设或结构化图形")
         if self.mode == "custom" and self.custom is None:
             raise ValueError("自定义模式需要素材和连接关系")
-        if self.mode == "custom" and self.preset_id is not None:
-            raise ValueError("自定义模式不能同时选择预设")
+        if self.mode == "custom" and (
+            self.preset_id is not None or self.prompt is not None
+        ):
+            raise ValueError("自定义模式不能同时选择预设或 Prompt")
         return self
 
 
@@ -138,6 +154,7 @@ class UiDryRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task: UiTaskInput
+    plan_id: str = Field(pattern=r"^figure_[a-zA-Z0-9_-]+$")
 
 
 class SafeEditorUrlMixin(BaseModel):
@@ -161,6 +178,12 @@ class UiEditorUrlRequest(SafeEditorUrlMixin):
     model_config = ConfigDict(extra="forbid")
 
 
+class UiCanvasCheckRequest(SafeEditorUrlMixin):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed_blank: bool
+
+
 class UiCalibrationRequest(SafeEditorUrlMixin):
     model_config = ConfigDict(extra="forbid")
 
@@ -173,6 +196,9 @@ class UiLiveRunRequest(SafeEditorUrlMixin):
     model_config = ConfigDict(extra="forbid")
 
     task: UiTaskInput
+    plan_id: str | None = Field(default=None, pattern=r"^figure_[a-zA-Z0-9_-]+$")
+    # Kept for old clients and persisted runs; the Wizard no longer sends it.
+    dry_run_id: str | None = Field(default=None, pattern=r"^figure_[a-zA-Z0-9_-]+$")
     confirmed_disposable: bool
     confirm_live: bool
     enable_biorender_ai: Literal[False] = False
@@ -195,4 +221,5 @@ class UiLoginRequest(BaseModel):
 class UiError(BaseModel):
     error_code: str
     message: str
+    diagnostic_hint: str | None = None
     details: dict[str, object] | list[object] | None = None

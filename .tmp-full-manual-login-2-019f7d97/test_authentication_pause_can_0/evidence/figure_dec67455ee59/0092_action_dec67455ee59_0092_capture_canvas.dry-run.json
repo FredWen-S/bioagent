@@ -1,0 +1,64 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_dec67455ee59_0092_capture_canvas",
+    "figure_id": "figure_dec67455ee59",
+    "sequence": 92,
+    "action": "capture_canvas",
+    "arguments": {
+      "scope": "full_canvas",
+      "expected_asset_ids": [
+        "t_cell_before",
+        "tumor_cell_before",
+        "pd1_before",
+        "pdl1_before",
+        "t_cell_after",
+        "tumor_cell_after",
+        "pd1_after",
+        "pdl1_after",
+        "antibody_after"
+      ],
+      "expected_label_ids": [
+        "label_t_cell_before",
+        "label_tumor_cell_before",
+        "label_pd1_before",
+        "label_pdl1_before",
+        "label_t_cell_after",
+        "label_tumor_cell_after",
+        "label_pd1_after",
+        "label_pdl1_after",
+        "label_antibody_after"
+      ],
+      "expected_relation_ids": [
+        "pd1_pdl1_binding_before",
+        "t_cell_inhibition_before",
+        "antibody_blocks_pd1_after",
+        "pd1_pdl1_blocked_after",
+        "t_cell_killing_after"
+      ],
+      "expected_group_ids": [
+        "group_t_cell_before",
+        "group_tumor_cell_before",
+        "group_pd1_before",
+        "group_pdl1_before",
+        "group_t_cell_after",
+        "group_tumor_cell_after",
+        "group_pd1_after",
+        "group_pdl1_after",
+        "group_antibody_after"
+      ],
+      "expected_region_ids": [
+        "without_treatment",
+        "anti_pd1_treatment"
+      ],
+      "verify_layout_quality": true
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": null
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

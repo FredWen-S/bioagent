@@ -1,0 +1,32 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_3919e28cf434_0022_add_text",
+    "figure_id": "figure_3919e28cf434",
+    "sequence": 22,
+    "action": "add_text",
+    "arguments": {
+      "entity_id": "pd1_before",
+      "element_id": "label_pd1_before",
+      "logical_label_id": "label_pd1_before",
+      "target_element_id": "pd1_before",
+      "text": "PD-1",
+      "expected_text": "PD-1",
+      "target_x": 0.162,
+      "target_y": 0.8270000000000001
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.1356,
+      "y": 0.807,
+      "width": 0.0528,
+      "height": 0.04,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

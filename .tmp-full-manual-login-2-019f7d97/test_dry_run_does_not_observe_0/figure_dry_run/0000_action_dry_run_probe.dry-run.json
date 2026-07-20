@@ -1,0 +1,26 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_dry_run_probe",
+    "figure_id": "figure_dry_run",
+    "sequence": 0,
+    "action": "drag_selected_asset",
+    "arguments": {
+      "target_x": 0.5,
+      "target_y": 0.5
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 100.0,
+      "y": 100.0,
+      "width": 50.0,
+      "height": 50.0,
+      "coordinate_space": "viewport_pixels"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

@@ -1,0 +1,27 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_dec67455ee59_0001_search_asset",
+    "figure_id": "figure_dec67455ee59",
+    "sequence": 1,
+    "action": "search_asset",
+    "arguments": {
+      "entity_id": "t_cell_before",
+      "logical_element_id": "t_cell_before",
+      "query": "T cell",
+      "fallback_queries": [
+        "CD8 T cell",
+        "T lymphocyte",
+        "immune cell"
+      ],
+      "max_queries": 4
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": null
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

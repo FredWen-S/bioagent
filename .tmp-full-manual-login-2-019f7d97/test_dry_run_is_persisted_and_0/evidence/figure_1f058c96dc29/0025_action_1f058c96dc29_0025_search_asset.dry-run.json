@@ -1,0 +1,27 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_1f058c96dc29_0025_search_asset",
+    "figure_id": "figure_1f058c96dc29",
+    "sequence": 25,
+    "action": "search_asset",
+    "arguments": {
+      "entity_id": "pdl1_before",
+      "logical_element_id": "pdl1_before",
+      "query": "PD-L1 ligand",
+      "fallback_queries": [
+        "PD-L1",
+        "membrane ligand",
+        "protein"
+      ],
+      "max_queries": 4
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": null
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

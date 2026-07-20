@@ -8,9 +8,16 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from app.api.main import handle_ui_service_error
 from app.api.ui_routes import create_ui_router
+from app.schemas.figure_spec import FigureStatus
+from app.schemas.gui_action import ActionStatus
 from app.schemas.ui import UiTaskInput
-from app.services.figure_execution_service import FigureExecutionService, UiServiceError
+from app.services.figure_execution_service import (
+    FigureExecutionService,
+    ManagedJob,
+    UiServiceError,
+)
 from app.storage.database import FigureDatabase
 
 
@@ -50,9 +57,34 @@ def _custom_task() -> dict[str, object]:
     }
 
 
+def _parsed_plan(client: TestClient, task: dict[str, object] | None = None) -> dict[str, object]:
+    response = client.post("/api/ui/plans", json={"task": task or _preset_task()})
+    assert response.status_code == 200
+    return response.json()
+
+
+def _dry_run(client: TestClient, task: dict[str, object] | None = None) -> dict[str, object]:
+    selected_task = task or _preset_task()
+    plan = _parsed_plan(client, selected_task)
+    response = client.post(
+        "/api/ui/dry-run",
+        json={"plan_id": plan["run_id"], "task": selected_task},
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
 @pytest.fixture
 def ui_service(tmp_path: Path) -> FigureExecutionService:
-    return FigureExecutionService(FigureDatabase(tmp_path / "ui.sqlite3"))
+    service = FigureExecutionService(FigureDatabase(tmp_path / "ui.sqlite3"))
+    service._login_verified = True
+    service._verified_canvas = {
+        "editor_url": "https://app.biorender.com/figure/disposable",
+        "redacted_url": "https://app.biorender.com/.../<redacted>",
+        "title": "Disposable Figure",
+        "checked_at": "2026-07-20T00:00:00+00:00",
+    }
+    return service
 
 
 @pytest.fixture
@@ -70,11 +102,192 @@ def client(ui_service: FigureExecutionService) -> TestClient:
             content={
                 "error_code": error.error_code,
                 "message": str(error),
+                "diagnostic_hint": error.diagnostic_hint,
                 "details": error.details,
             },
         )
 
     return TestClient(app)
+
+
+class _LoginPage:
+    def __init__(self) -> None:
+        self.closed = threading.Event()
+        self.url = "https://app.biorender.com/"
+
+    def goto(self, url: str, **_kwargs: object) -> None:
+        self.url = url
+
+    def is_closed(self) -> bool:
+        return self.closed.is_set()
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        if self.closed.wait(milliseconds / 1000):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+
+class _LoginOperator:
+    def __init__(self, page: _LoginPage) -> None:
+        self.page = page
+        self.close_called = False
+
+    def close(self) -> None:
+        self.close_called = True
+
+
+class _LoginOperatorFactory:
+    def __init__(self) -> None:
+        self.operators: list[_LoginOperator] = []
+
+    def __call__(self, _database: FigureDatabase) -> _LoginOperator:
+        operator = _LoginOperator(_LoginPage())
+        self.operators.append(operator)
+        return operator
+
+
+def _production_login_client(service: FigureExecutionService) -> TestClient:
+    login_app = FastAPI()
+    login_app.include_router(create_ui_router(service))
+    login_app.add_exception_handler(UiServiceError, handle_ui_service_error)
+    return TestClient(login_app)
+
+
+def _stop_login_job(service: FigureExecutionService, job_id: str) -> None:
+    service.request_job_stop(job_id)
+    service._threads[job_id].join(timeout=2)
+    assert service.get_job(job_id)["status"] == "stopped"
+
+
+def test_manual_login_api_route_enters_waiting_wizard_state(tmp_path: Path) -> None:
+    factory = _LoginOperatorFactory()
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-route.sqlite3"),
+        live_operator_factory=factory,
+    )
+    response = _production_login_client(service).post(
+        "/api/ui/login/open",
+        json={"confirm_manual_login": True},
+    )
+    assert response.status_code == 202
+    job = response.json()
+    assert job["kind"] == "manual_login"
+    assert job["status"] == "waiting_user"
+    assert service.system_status()["active_jobs"][0]["id"] == job["id"]
+    workflow = service.workflow_state()
+    assert workflow["state"] == "login_checking"
+    assert workflow["step"] == 1
+    _stop_login_job(service, str(job["id"]))
+
+
+def test_manual_login_startup_failure_returns_actionable_error(tmp_path: Path) -> None:
+    def missing_chromium(_database: FigureDatabase) -> _LoginOperator:
+        raise RuntimeError(
+            "Executable doesn't exist. Please run playwright install chromium"
+        )
+
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-failure.sqlite3"),
+        live_operator_factory=missing_chromium,
+    )
+    response = _production_login_client(service).post(
+        "/api/ui/login/open",
+        json={"confirm_manual_login": True},
+    )
+    assert response.status_code == 503
+    assert response.json() == {
+        "error_code": "CHROMIUM_NOT_INSTALLED",
+        "message": "Chromium 未安装，无法打开人工登录窗口。",
+        "diagnostic_hint": (
+            "请在启动 Web UI 的同一 Python 环境运行："
+            "python -m playwright install chromium"
+        ),
+        "details": None,
+    }
+    assert service.system_status()["active_jobs"] == []
+
+
+@pytest.mark.parametrize(
+    ("raw_error", "expected_status", "expected_code"),
+    [
+        (
+            "user data directory is already in use by another process",
+            409,
+            "BROWSER_PROFILE_IN_USE",
+        ),
+        ("CreateProcess failed: Access is denied", 503, "PLAYWRIGHT_LAUNCH_FAILED"),
+        (
+            "Target page, context or browser has been closed",
+            409,
+            "LOGIN_WINDOW_CLOSED",
+        ),
+    ],
+)
+def test_manual_login_launch_errors_are_classified(
+    tmp_path: Path,
+    raw_error: str,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    def failed_launch(_database: FigureDatabase) -> _LoginOperator:
+        raise RuntimeError(raw_error)
+
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / f"{expected_code}.sqlite3"),
+        live_operator_factory=failed_launch,
+    )
+    response = _production_login_client(service).post(
+        "/api/ui/login/open",
+        json={"confirm_manual_login": True},
+    )
+    assert response.status_code == expected_status
+    assert response.json()["error_code"] == expected_code
+    assert response.json()["diagnostic_hint"]
+    assert service.system_status()["active_jobs"] == []
+
+
+def test_closing_login_window_releases_browser_busy(tmp_path: Path) -> None:
+    factory = _LoginOperatorFactory()
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-close.sqlite3"),
+        live_operator_factory=factory,
+    )
+    job = service.start_manual_login()
+    factory.operators[0].page.closed.set()
+    service._threads[str(job["id"])].join(timeout=2)
+    failed = service.get_job(str(job["id"]))
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "LOGIN_WINDOW_CLOSED"
+    assert "重新点击" in str(failed["diagnostic_hint"])
+    assert service.system_status()["active_jobs"] == []
+    service._ensure_browser_available()
+
+
+def test_manual_login_safe_stop_allows_reopen(tmp_path: Path) -> None:
+    factory = _LoginOperatorFactory()
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-reopen.sqlite3"),
+        live_operator_factory=factory,
+    )
+    first = service.start_manual_login()
+    _stop_login_job(service, str(first["id"]))
+    second = service.start_manual_login()
+    assert second["id"] != first["id"]
+    assert second["status"] == "waiting_user"
+    _stop_login_job(service, str(second["id"]))
+
+
+def test_repeated_manual_login_does_not_start_two_browsers(tmp_path: Path) -> None:
+    factory = _LoginOperatorFactory()
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-duplicate.sqlite3"),
+        live_operator_factory=factory,
+    )
+    first = service.start_manual_login()
+    with pytest.raises(UiServiceError) as raised:
+        service.start_manual_login()
+    assert raised.value.error_code == "LOGIN_JOB_ALREADY_ACTIVE"
+    assert len(factory.operators) == 1
+    _stop_login_job(service, str(first["id"]))
 
 
 def test_status_and_presets_are_user_safe(client: TestClient) -> None:
@@ -95,13 +308,210 @@ def test_status_and_presets_are_user_safe(client: TestClient) -> None:
     ]
 
 
+def test_login_is_required_before_canvas_step(tmp_path: Path) -> None:
+    service = FigureExecutionService(FigureDatabase(tmp_path / "login-gate.sqlite3"))
+    workflow = service.workflow_state()
+    assert workflow["state"] == "login_required"
+    assert workflow["step"] == 1
+    assert workflow["buttons"]["check_canvas"] is False
+    with pytest.raises(UiServiceError) as raised:
+        service.start_canvas_check(
+            "https://app.biorender.com/figure/disposable",
+            confirmed_blank=True,
+        )
+    assert raised.value.error_code == "LOGIN_REQUIRED"
+
+
+def test_canvas_must_be_verified_before_prompt_step(tmp_path: Path) -> None:
+    service = FigureExecutionService(FigureDatabase(tmp_path / "canvas-gate.sqlite3"))
+    service._login_verified = True
+    assert service.workflow_state()["state"] == "canvas_required"
+    with pytest.raises(UiServiceError) as raised:
+        service.inspect_plan(UiTaskInput.model_validate(_preset_task()))
+    assert raised.value.error_code == "CANVAS_NOT_VERIFIED"
+
+
+def test_prompt_must_be_parsed_before_dry_run(client: TestClient) -> None:
+    response = client.post(
+        "/api/ui/dry-run",
+        json={"plan_id": "figure_missing", "task": _preset_task()},
+    )
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "PLAN_REQUIRED"
+
+
+def test_prompt_step_backend_state_allows_direct_execution_after_parse(
+    ui_service: FigureExecutionService,
+) -> None:
+    required = ui_service.workflow_state()
+    assert required["state"] == "prompt_required"
+    assert required["step3_phase"] == "parse_required"
+    assert required["next_block_reason"] == "请先解析绘图需求"
+
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    parsed = ui_service.workflow_state(plan_id=str(plan["run_id"]))
+    assert parsed["step3_phase"] == "parsed"
+    assert parsed["next_block_reason"] == ""
+    assert parsed["buttons"]["start_live"] is True
+
+
+def test_custom_prompt_can_enter_direct_execution_after_plan(client: TestClient) -> None:
+    task = {
+        "mode": "prompt",
+        "preset_id": None,
+        "prompt": "绘制 PD-1 与 PD-L1 结合并抑制 T 细胞活化的机制图，使用左到右布局",
+        "custom": None,
+    }
+    plan = _parsed_plan(client, task)
+    workflow = client.get(
+        "/api/ui/workflow-state",
+        params={"plan_id": plan["run_id"]},
+    ).json()
+    assert workflow["state"] == "prompt_parsed"
+    assert workflow["buttons"]["start_live"] is True
+
+
+def test_live_run_can_start_from_parsed_plan_without_dry_run(
+    ui_service: FigureExecutionService,
+) -> None:
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    running = threading.Event()
+
+    def hold_live_job(job_id: str) -> None:
+        job = ui_service._jobs[job_id]
+        ui_service._update_job(job, "running", "test running")
+        running.set()
+        job.stop_event.wait(timeout=2)
+        ui_service._update_job(job, "stopped", "test stopped")
+
+    ui_service._run_live_job = hold_live_job  # type: ignore[method-assign]
+    job = ui_service.start_live(
+        task,
+        "https://app.biorender.com/figure/disposable",
+        plan_id=str(plan["run_id"]),
+        dry_run_id=None,
+    )
+    assert running.wait(timeout=1)
+    assert job["kind"] == "live_figure"
+    ui_service.request_job_stop(str(job["id"]))
+    ui_service._threads[str(job["id"])].join(timeout=2)
+
+
 def test_dry_run_uses_existing_workflow(client: TestClient) -> None:
-    response = client.post("/api/ui/dry-run", json={"task": _preset_task()})
-    assert response.status_code == 200
-    payload = response.json()
+    payload = _dry_run(client)
     assert payload["status"] == "awaiting_confirmation"
     assert payload["total_actions"] > 0
+    assert payload["dry_run_completed"] is True
+    assert payload["dry_run_confirmed"] is False
+    assert payload["can_confirm_dry_run"] is True
     assert payload["real_biorender_accepted"] is False
+    workflow = client.get(
+        "/api/ui/workflow-state",
+        params={"dry_run_id": payload["run_id"]},
+    ).json()
+    assert workflow["state"] == "dry_run_confirmation_required"
+    assert workflow["step"] == 3
+    assert workflow["buttons"]["start_live"] is False
+
+
+def test_dry_run_releases_busy_and_live_is_blocked_until_confirmation(
+    client: TestClient,
+) -> None:
+    dry_run = _dry_run(client)
+    status = client.get("/api/ui/status").json()
+    assert status["active_jobs"] == []
+
+    live = client.post(
+        "/api/ui/live-runs",
+        json={
+            "editor_url": "https://app.biorender.com/figure/disposable",
+            "task": _preset_task(),
+            "dry_run_id": dry_run["run_id"],
+            "confirmed_disposable": True,
+            "confirm_live": True,
+            "enable_biorender_ai": False,
+        },
+    )
+    assert live.status_code == 409
+    assert live.json()["error_code"] == "DRY_RUN_CONFIRMATION_REQUIRED"
+
+
+def test_confirmed_dry_run_allows_live_to_enter_next_stage(
+    client: TestClient,
+    ui_service: FigureExecutionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dry_run = _dry_run(client)
+    confirmation = client.post(
+        f"/api/ui/runs/{dry_run['run_id']}/confirm-dry-run",
+        json={},
+    )
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "completed"
+    assert confirmation.json()["dry_run_confirmed"] is True
+
+    started: list[str] = []
+
+    def record_start(figure_id: str) -> dict[str, object]:
+        started.append(figure_id)
+        return {
+            "id": "job_test",
+            "kind": "live_figure",
+            "status": "queued",
+            "message": "queued",
+            "figure_id": figure_id,
+        }
+
+    monkeypatch.setattr(ui_service, "start_resume", record_start)
+    live = client.post(
+        "/api/ui/live-runs",
+        json={
+            "editor_url": "https://app.biorender.com/figure/disposable",
+            "task": _preset_task(),
+            "dry_run_id": dry_run["run_id"],
+            "confirmed_disposable": True,
+            "confirm_live": True,
+            "enable_biorender_ai": False,
+        },
+    )
+    assert live.status_code == 202
+    assert started == [live.json()["figure_id"]]
+    assert started[0] != dry_run["run_id"]
+    events = ui_service.database.list_audit_events(figure_id=started[0])
+    assert events[-1]["event_type"] == "live_started_from_confirmed_dry_run"
+    assert events[-1]["payload"]["dry_run_id"] == dry_run["run_id"]
+    workflow = client.get(
+        "/api/ui/workflow-state",
+        params={"dry_run_id": dry_run["run_id"]},
+    ).json()
+    assert workflow["state"] == "ready_to_execute"
+    assert workflow["step"] == 4
+    assert workflow["buttons"]["start_live"] is True
+
+
+def test_confirmed_dry_run_cannot_authorize_a_changed_task(client: TestClient) -> None:
+    dry_run = _dry_run(client)
+    confirmed = client.post(
+        f"/api/ui/runs/{dry_run['run_id']}/confirm-dry-run",
+        json={},
+    )
+    assert confirmed.status_code == 200
+
+    live = client.post(
+        "/api/ui/live-runs",
+        json={
+            "editor_url": "https://app.biorender.com/figure/disposable",
+            "task": _custom_task(),
+            "dry_run_id": dry_run["run_id"],
+            "confirmed_disposable": True,
+            "confirm_live": True,
+            "enable_biorender_ai": False,
+        },
+    )
+    assert live.status_code == 409
+    assert live.json()["error_code"] == "DRY_RUN_TASK_MISMATCH"
 
 
 def test_limited_custom_figure_can_be_planned(client: TestClient) -> None:
@@ -196,6 +606,7 @@ def test_unknown_run_has_stable_error(client: TestClient) -> None:
     assert response.json() == {
         "error_code": "RUN_NOT_FOUND",
         "message": "未找到绘图任务。",
+        "diagnostic_hint": None,
         "details": None,
     }
 
@@ -244,3 +655,298 @@ def test_resume_does_not_start_duplicate_job(ui_service: FigureExecutionService)
         ui_service.start_resume(bundle.figure_spec.id)
     assert raised.value.error_code in {"BROWSER_BUSY", "RUN_ALREADY_ACTIVE"}
     release.set()
+
+
+def test_safe_stop_releases_browser_job_and_allows_retry(
+    ui_service: FigureExecutionService,
+) -> None:
+    bundle = ui_service.plan_task(UiTaskInput.model_validate(_preset_task()))
+    running = threading.Event()
+
+    def stoppable_job(job_id: str) -> None:
+        job = ui_service._jobs[job_id]
+        ui_service._update_job(job, "running", "test running")
+        running.set()
+        job.stop_event.wait(timeout=2)
+        ui_service._update_job(job, "stopped", "test stopped")
+
+    ui_service._run_live_job = stoppable_job  # type: ignore[method-assign]
+    job = ui_service.start_resume(bundle.figure_spec.id)
+    assert running.wait(timeout=1)
+    stopped = ui_service.request_job_stop(str(job["id"]))
+    assert stopped["status"] == "stop_requested"
+    ui_service._threads[str(job["id"])].join(timeout=2)
+    assert ui_service.get_job(str(job["id"]))["status"] == "stopped"
+    ui_service._ensure_browser_available()
+
+
+def test_dead_job_is_reaped_instead_of_leaving_browser_busy(
+    ui_service: FigureExecutionService,
+) -> None:
+    ui_service._jobs["dead_job"] = ManagedJob(
+        id="dead_job",
+        kind="manual_login",
+        status="waiting_user",
+        message="waiting",
+    )
+    status = ui_service.system_status()
+    assert status["active_jobs"] == []
+    assert ui_service.get_job("dead_job")["status"] == "failed"
+    assert ui_service.get_job("dead_job")["error_code"] == "STALE_JOB_RECOVERED"
+    ui_service._ensure_browser_available()
+
+
+def test_service_restart_recovers_residual_running_figure(tmp_path: Path) -> None:
+    database = FigureDatabase(tmp_path / "restart.sqlite3")
+    first_service = FigureExecutionService(database)
+    bundle = first_service.plan_task(UiTaskInput.model_validate(_preset_task()))
+    database.set_status(bundle.figure_spec.id, FigureStatus.EXECUTING)
+
+    restarted = FigureExecutionService(database)
+    summary = restarted.run_summary(bundle.figure_spec.id)
+    assert summary["status"] == "paused_reconciliation"
+    assert summary["can_resume"] is True
+    events = database.list_audit_events(figure_id=bundle.figure_spec.id)
+    assert events[-1]["event_type"] == "service_recovered_interrupted_run"
+    assert events[-1]["payload"]["previous_status"] == "executing"
+
+
+def test_workflow_refresh_restores_plan_and_active_job(
+    ui_service: FigureExecutionService,
+) -> None:
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    workflow = ui_service.workflow_state(plan_id=str(plan["run_id"]))
+    assert workflow["state"] == "prompt_parsed"
+    assert workflow["step"] == 3
+    assert workflow["plan_summary"]["asset_count"] > 0
+
+    ui_service._jobs["refresh_job"] = ManagedJob(
+        id="refresh_job",
+        kind="live_figure",
+        status="running",
+        message="running",
+        figure_id=str(plan["run_id"]),
+    )
+    ui_service._threads["refresh_job"] = threading.current_thread()
+    status = ui_service.system_status()
+    assert status["active_jobs"][0]["id"] == "refresh_job"
+    restored = ui_service.workflow_state(run_id=str(plan["run_id"]))
+    assert restored["state"] == "executing"
+    assert restored["step"] == 4
+
+
+def test_unknown_result_is_completed_with_manual_review(
+    ui_service: FigureExecutionService,
+) -> None:
+    task = UiTaskInput.model_validate(_preset_task())
+    bundle = ui_service.plan_task(task)
+    with ui_service.database.connect() as connection:
+        connection.execute(
+            "UPDATE element_requirements SET status = 'unknown' WHERE figure_id = ?",
+            (bundle.figure_spec.id,),
+        )
+    ui_service.database.set_status(bundle.figure_spec.id, FigureStatus.COMPLETED)
+    workflow = ui_service.workflow_state(run_id=bundle.figure_spec.id)
+    assert workflow["state"] == "completed_with_unknown"
+    assert workflow["step"] == 5
+
+
+def test_starting_new_workflow_does_not_reuse_old_run(
+    ui_service: FigureExecutionService,
+) -> None:
+    old = ui_service.inspect_plan(UiTaskInput.model_validate(_preset_task()))
+    ui_service.reset_workflow()
+    workflow = ui_service.workflow_state()
+    assert workflow["state"] == "canvas_required"
+    assert workflow["step"] == 2
+    assert str(old["run_id"]) not in str(workflow)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the "prepare failed but can_resume=true" incident
+# (Run figure_8875196268ee style). These make sure that:
+#   * A failure inside open_biorender_editor is NOT surfaced as safely
+#     resumable — Resume without fixing the environment would just re-fail.
+#   * A Live Run created from a confirmed Dry Run keeps the linkage
+#     (source_dry_run_id, task_fingerprint, dry_run_gate) so the UI cannot
+#     silently drift into "task_fingerprint=null".
+# ---------------------------------------------------------------------------
+
+
+def _mark_prepare_failed(
+    service: FigureExecutionService,
+    figure_id: str,
+    *,
+    subcode: str = "redirected_off_domain",
+    requested_url: str = "https://app.biorender.com/figure/disposable",
+    observed_url: str = "https://www.biorender.com/marketing",
+) -> str:
+    """Persist a realistic open_biorender_editor failure straight into the DB."""
+    from app.schemas.gui_action import GuiActionResult
+
+    actions = service.database.list_actions(figure_id)
+    prepare = next(action for action in actions if action.action.value == "open_biorender_editor")
+    result = GuiActionResult(
+        action_id=prepare.id,
+        status=ActionStatus.FAILED,
+        attempt=1,
+        error_type="editor_prepare_failed",
+        message="canvas never appeared",
+        screenshot_path=None,
+        expected_bbox=None,
+        metadata={
+            "mode": "live",
+            "evidence_kind": "failure",
+            "safe_to_retry": False,
+            "editor_prepare_failure": {
+                "error_type": "editor_prepare_failed",
+                "subcode": subcode,
+                "requested_url": requested_url,
+                "observed_url": observed_url,
+                "screenshot_path": None,
+            },
+        },
+    )
+    service.database.record_action_result(figure_id, result)
+    service.database.set_status(figure_id, FigureStatus.FAILED)
+    return prepare.id
+
+
+def test_prepare_failure_is_not_marked_safe_to_resume(
+    ui_service: FigureExecutionService,
+) -> None:
+    from app.schemas.gui_action import ActionStatus  # noqa: F401  (imported for clarity)
+
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    _mark_prepare_failed(ui_service, str(plan["run_id"]))
+
+    summary = ui_service.run_summary(str(plan["run_id"]))
+    assert summary["status"] == "failed"
+    assert summary["current_action"]["action_type"] == "open_biorender_editor"
+    assert summary["can_resume"] is False, (
+        "prepare-phase failure must NOT be offered as a safe Resume"
+    )
+    assert summary["resume_blocked_reason"]
+    assert "Resume" in summary["resume_blocked_reason"] or "重新开始" in summary["resume_blocked_reason"]
+    prepare = summary["prepare_failure"]
+    assert prepare is not None
+    assert prepare["subcode"] == "redirected_off_domain"
+    assert prepare["requested_url"].endswith("/figure/disposable")
+    assert prepare["observed_url"] == "https://www.biorender.com/marketing"
+    assert prepare["error_type"] == "editor_prepare_failed"
+
+
+def test_paused_failures_remain_resumable(
+    ui_service: FigureExecutionService,
+) -> None:
+    """Regression guard: tightening can_resume must not break legit pauses."""
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    for paused_state in (
+        FigureStatus.PAUSED_AUTHENTICATION,
+        FigureStatus.PAUSED_APPROVAL,
+        FigureStatus.PAUSED_RECONCILIATION,
+    ):
+        ui_service.database.set_status(str(plan["run_id"]), paused_state)
+        summary = ui_service.run_summary(str(plan["run_id"]))
+        assert summary["can_resume"] is True, paused_state
+        assert summary["resume_blocked_reason"] is None, paused_state
+
+
+def test_live_run_from_confirmed_dry_run_exposes_linkage(
+    client: TestClient,
+    ui_service: FigureExecutionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Live Run must expose the source Dry Run and its fingerprint.
+
+    Previously ``run_summary`` looked up dry-run events on the *live* figure
+    id — which never has any — so the UI always saw
+    dry_run_completed=false / task_fingerprint=null even when the backend
+    had a fully confirmed dry run behind the run.
+    """
+    dry_run = _dry_run(client)
+    confirmation = client.post(
+        f"/api/ui/runs/{dry_run['run_id']}/confirm-dry-run",
+        json={},
+    )
+    assert confirmation.status_code == 200
+    dry_run_fingerprint = confirmation.json()["task_fingerprint"]
+    assert dry_run_fingerprint
+
+    started: list[str] = []
+
+    def record_start(figure_id: str) -> dict[str, object]:
+        started.append(figure_id)
+        return {
+            "id": "job_test",
+            "kind": "live_figure",
+            "status": "queued",
+            "message": "queued",
+            "figure_id": figure_id,
+        }
+
+    monkeypatch.setattr(ui_service, "start_resume", record_start)
+    live = client.post(
+        "/api/ui/live-runs",
+        json={
+            "editor_url": "https://app.biorender.com/figure/disposable",
+            "task": _preset_task(),
+            "dry_run_id": dry_run["run_id"],
+            "confirmed_disposable": True,
+            "confirm_live": True,
+            "enable_biorender_ai": False,
+        },
+    )
+    assert live.status_code == 202
+    live_figure_id = started[0]
+
+    summary = ui_service.run_summary(live_figure_id)
+    assert summary["source_dry_run_id"] == dry_run["run_id"]
+    assert summary["dry_run_gate"] == "confirmed_dry_run"
+    assert summary["dry_run_confirmed"] is True
+    assert summary["dry_run_completed"] is True
+    assert summary["task_fingerprint"] == dry_run_fingerprint
+
+
+def test_live_run_from_plan_only_exposes_gate(
+    ui_service: FigureExecutionService,
+) -> None:
+    """A Live Run started from a plan alone must expose ``dry_run_gate=plan_only``.
+
+    That is the intentional bypass (the wizard permits it), but silence about
+    the bypass is what let the incident escape review. Surface it so the UI
+    and audit can tell the two paths apart.
+    """
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    running = threading.Event()
+
+    def hold_live_job(job_id: str) -> None:
+        job = ui_service._jobs[job_id]
+        ui_service._update_job(job, "running", "test running")
+        running.set()
+        job.stop_event.wait(timeout=2)
+        ui_service._update_job(job, "stopped", "test stopped")
+
+    ui_service._run_live_job = hold_live_job  # type: ignore[method-assign]
+    job = ui_service.start_live(
+        task,
+        "https://app.biorender.com/figure/disposable",
+        plan_id=str(plan["run_id"]),
+        dry_run_id=None,
+    )
+    assert running.wait(timeout=1)
+    live_figure_id = str(job["figure_id"])
+    summary = ui_service.run_summary(live_figure_id)
+    assert summary["source_plan_id"] == str(plan["run_id"])
+    assert summary["source_dry_run_id"] is None
+    assert summary["dry_run_gate"] == "plan_only"
+    # Fingerprint still comes from the parsed plan so the UI cannot show
+    # task_fingerprint=null for a Live Run that started from a real plan.
+    assert summary["task_fingerprint"]
+
+    ui_service.request_job_stop(str(job["id"]))
+    ui_service._threads[str(job["id"])].join(timeout=2)

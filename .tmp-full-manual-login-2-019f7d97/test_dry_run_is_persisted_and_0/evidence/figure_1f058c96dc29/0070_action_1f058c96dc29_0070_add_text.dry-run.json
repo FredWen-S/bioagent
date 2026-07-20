@@ -1,0 +1,32 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_1f058c96dc29_0070_add_text",
+    "figure_id": "figure_1f058c96dc29",
+    "sequence": 70,
+    "action": "add_text",
+    "arguments": {
+      "entity_id": "antibody_after",
+      "element_id": "label_antibody_after",
+      "logical_label_id": "label_antibody_after",
+      "target_element_id": "antibody_after",
+      "text": "Anti-PD-1",
+      "expected_text": "Anti-PD-1",
+      "target_x": 0.642,
+      "target_y": 0.8837
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.59448,
+      "y": 0.8637,
+      "width": 0.09504,
+      "height": 0.04,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

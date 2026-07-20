@@ -1,0 +1,29 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_3919e28cf434_0027_drag_selected_asset",
+    "figure_id": "figure_3919e28cf434",
+    "sequence": 27,
+    "action": "drag_selected_asset",
+    "arguments": {
+      "entity_id": "pdl1_before",
+      "logical_element_id": "pdl1_before",
+      "target_x": 0.395,
+      "target_y": 0.71,
+      "target_width": 0.11900000000000001
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.3355,
+      "y": 0.6505,
+      "width": 0.11900000000000001,
+      "height": 0.11900000000000001,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

@@ -1,0 +1,30 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_1f058c96dc29_0056_resize_element",
+    "figure_id": "figure_1f058c96dc29",
+    "sequence": 56,
+    "action": "resize_element",
+    "arguments": {
+      "element_id": "label_pd1_after",
+      "logical_label_id": "label_pd1_after",
+      "target_element_id": "pd1_after",
+      "element_kind": "label",
+      "target_width": 0.06,
+      "target_height": 0.04
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.6,
+      "y": 0.6250000000000001,
+      "width": 0.06,
+      "height": 0.04,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

@@ -1,0 +1,30 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_225b069a3586_0015_move_element",
+    "figure_id": "figure_225b069a3586",
+    "sequence": 15,
+    "action": "move_element",
+    "arguments": {
+      "element_id": "label_tumor_cell_before",
+      "logical_label_id": "label_tumor_cell_before",
+      "target_element_id": "tumor_cell_before",
+      "element_kind": "label",
+      "target_x": 0.37,
+      "target_y": 0.475
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.3172,
+      "y": 0.45499999999999996,
+      "width": 0.1056,
+      "height": 0.04,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

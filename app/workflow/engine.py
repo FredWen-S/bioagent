@@ -4,7 +4,12 @@ from collections.abc import Callable
 
 from app.operator.action_planner import GuiActionPlanner
 from app.operator.base import GuiOperator
-from app.operator.errors import AuthenticationRequired, OperatorError, PolicyBlocked
+from app.operator.errors import (
+    AuthenticationRequired,
+    EditorPrepareFailed,
+    OperatorError,
+    PolicyBlocked,
+)
 from app.operator.safety import ActionSafetyPolicy, UnsafeActionError
 from app.planner.asset_search_planner import AssetSearchPlanner
 from app.planner.figure_planner import ScientificFigurePlanner
@@ -294,6 +299,27 @@ class WorkflowEngine:
                         )
                     except OperatorError as error:
                         screenshot_path = error.screenshot_path
+                        failure_metadata: dict[str, object] = {
+                            "mode": "live",
+                            "evidence_kind": "failure",
+                        }
+                        if isinstance(error, EditorPrepareFailed):
+                            failure_metadata["editor_prepare_failure"] = (
+                                error.structured_payload()
+                            )
+                            # Environmental prepare failures are not safe to
+                            # blind-retry; the environment must be fixed first.
+                            failure_metadata["safe_to_retry"] = False
+                            self.database.add_audit_event(
+                                "editor_prepare_failed",
+                                {
+                                    "action_id": action.id,
+                                    **error.structured_payload(),
+                                    "message": str(error),
+                                    "attempt": attempt,
+                                },
+                                figure_id=figure_id,
+                            )
                         last_result = GuiActionResult(
                             action_id=action.id,
                             status=ActionStatus.FAILED,
@@ -307,7 +333,7 @@ class WorkflowEngine:
                             ]
                             if screenshot_path
                             else [],
-                            metadata={"mode": "live", "evidence_kind": "failure"},
+                            metadata=failure_metadata,
                         )
                     except Exception as error:  # preserve evidence and stop safely
                         last_result = GuiActionResult(
@@ -317,6 +343,12 @@ class WorkflowEngine:
                             error_type=type(error).__name__,
                             message=str(error),
                             expected_bbox=action.expected_bbox,
+                            metadata={
+                                "mode": "live",
+                                "evidence_kind": "failure",
+                                "safe_to_retry": False,
+                                "unhandled_exception": True,
+                            },
                         )
                     self.database.record_action_result(figure_id, last_result)
                     self._update_element_statuses(action, last_result.status)

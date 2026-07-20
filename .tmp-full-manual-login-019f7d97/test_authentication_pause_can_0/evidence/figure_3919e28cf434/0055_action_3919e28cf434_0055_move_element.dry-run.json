@@ -1,0 +1,30 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_3919e28cf434_0055_move_element",
+    "figure_id": "figure_3919e28cf434",
+    "sequence": 55,
+    "action": "move_element",
+    "arguments": {
+      "element_id": "label_pd1_after",
+      "logical_label_id": "label_pd1_after",
+      "target_element_id": "pd1_after",
+      "element_kind": "label",
+      "target_x": 0.63,
+      "target_y": 0.6450000000000001
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.6036,
+      "y": 0.6250000000000001,
+      "width": 0.0528,
+      "height": 0.04,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

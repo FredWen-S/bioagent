@@ -1,0 +1,35 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_dec67455ee59_0079_connect_elements",
+    "figure_id": "figure_dec67455ee59",
+    "sequence": 79,
+    "action": "connect_elements",
+    "arguments": {
+      "relation_id": "t_cell_inhibition_before",
+      "logical_connector_id": "t_cell_inhibition_before",
+      "source_entity_id": "tumor_cell_before",
+      "target_entity_id": "t_cell_before",
+      "connector_type": "t_bar",
+      "semantic_role": "inhibition",
+      "direction": "source_to_target",
+      "start_anchor": "center",
+      "end_anchor": "center",
+      "expected_route": "straight",
+      "label": "T-cell inhibition"
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.05499999999999999,
+      "y": 0.255,
+      "width": 0.41000000000000003,
+      "height": 0.19,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

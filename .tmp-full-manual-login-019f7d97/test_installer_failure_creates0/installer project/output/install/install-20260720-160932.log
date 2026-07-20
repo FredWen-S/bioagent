@@ -1,0 +1,7 @@
+﻿[检查] 项目根目录：C:\bioagent\.tmp-full-manual-login-019f7d97\test_installer_failure_creates0\installer project
+Windows：Microsoft Windows NT 10.0.26200.0
+PowerShell：5.1.26100.8875
+管理员权限：False（安装不要求管理员权限）
+[检查] 正在查找 Python 3.12 或 3.11...
+[失败] 失败步骤：检查 Python
+[失败] 错误摘要：-PythonPath 指定的文件不存在：C:\bioagent\.tmp-full-manual-login-019f7d97\test_installer_failure_creates0\installer project\missing-python.exe

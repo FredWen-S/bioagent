@@ -1,0 +1,32 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_1f058c96dc29_0038_add_text",
+    "figure_id": "figure_1f058c96dc29",
+    "sequence": 38,
+    "action": "add_text",
+    "arguments": {
+      "entity_id": "t_cell_after",
+      "element_id": "label_t_cell_after",
+      "logical_label_id": "label_t_cell_after",
+      "target_element_id": "t_cell_after",
+      "text": "T cell",
+      "expected_text": "T cell",
+      "target_x": 0.642,
+      "target_y": 0.4303
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.61032,
+      "y": 0.4103,
+      "width": 0.06336000000000001,
+      "height": 0.04,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

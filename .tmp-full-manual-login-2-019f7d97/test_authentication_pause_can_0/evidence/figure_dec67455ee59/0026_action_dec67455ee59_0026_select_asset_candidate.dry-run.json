@@ -1,0 +1,21 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_dec67455ee59_0026_select_asset_candidate",
+    "figure_id": "figure_dec67455ee59",
+    "sequence": 26,
+    "action": "select_asset_candidate",
+    "arguments": {
+      "entity_id": "pdl1_before",
+      "logical_element_id": "pdl1_before",
+      "selection_policy": "best_safe_ordinary_asset"
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": null
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}
