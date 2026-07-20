@@ -1,3 +1,6 @@
+from typing import Any
+
+
 class OperatorError(RuntimeError):
     error_type = "operator_error"
 
@@ -8,6 +11,47 @@ class OperatorError(RuntimeError):
 
 class AuthenticationRequired(OperatorError):
     error_type = "authentication_required"
+
+
+class EditorPrepareFailed(OperatorError):
+    """Raised while the BioRender editor is being prepared but never becomes ready.
+
+    The ``subcode`` distinguishes the observed failure mode so callers can react
+    differently: a genuine timeout waiting for the canvas is classified as
+    ``canvas_not_found``, while redirects/closures are surfaced as their own
+    subcodes and are NOT collapsed into ``canvas_not_found``.
+    """
+
+    error_type = "editor_prepare_failed"
+
+    VALID_SUBCODES = frozenset(
+        {
+            "canvas_not_found",
+            "redirected_to_login",
+            "redirected_off_domain",
+            "page_closed",
+            "navigation_timeout",
+        }
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        subcode: str,
+        metadata: dict[str, Any] | None = None,
+        screenshot_path: str | None = None,
+    ) -> None:
+        if subcode not in self.VALID_SUBCODES:
+            raise ValueError(
+                f"unknown EditorPrepareFailed subcode: {subcode!r}; "
+                f"expected one of {sorted(self.VALID_SUBCODES)}"
+            )
+        super().__init__(message, screenshot_path=screenshot_path)
+        self.subcode = subcode
+        self.metadata: dict[str, Any] = dict(metadata or {})
+        if screenshot_path is not None:
+            self.metadata.setdefault("screenshot_path", screenshot_path)
 
 
 class UiLayoutChanged(OperatorError):

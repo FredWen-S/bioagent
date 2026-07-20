@@ -101,6 +101,10 @@ class FakePage:
         self.viewport_size = {"width": 1440, "height": 1000}
         self.mouse = FakeMouse()
         self.goto_calls: list[str] = []
+        self.closed = False
+
+    def is_closed(self) -> bool:
+        return self.closed
 
     def locator(self, selector: str) -> FakeLocator:
         return FakeLocator(self.selector_map.get(selector, []))

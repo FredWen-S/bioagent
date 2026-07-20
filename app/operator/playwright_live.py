@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from app.config import settings
 from app.operator.biorender.calibration import BioRenderUiCalibrator
@@ -40,6 +43,7 @@ from app.operator.errors import (
     AuthenticationRequired,
     CandidateIdentityUnclear,
     DragDropFailed,
+    EditorPrepareFailed,
     OperatorError,
     PolicyBlocked,
     SearchNoResult,
@@ -58,6 +62,33 @@ from app.schemas.gui_action import (
     ObservationSource,
 )
 from app.storage.database import FigureDatabase
+
+logger = logging.getLogger(__name__)
+
+# Default upper bound for waiting until the BioRender editor canvas becomes
+# interactive after navigation. The old value (~1.5s) was far below what a
+# freshly loaded editor needs while the loading placeholder is visible.
+DEFAULT_EDITOR_READY_TIMEOUT_SECONDS = 30.0
+
+# Selectors that indicate the editor is still loading (skeletons/spinners/
+# placeholders). Presence of any of these is recorded in the failure metadata
+# so callers can distinguish "canvas never rendered" from "still loading".
+EDITOR_LOADING_INDICATOR_SELECTOR = (
+    "[data-testid*='loading'], "
+    "[data-testid*='skeleton'], "
+    "[data-testid*='placeholder'], "
+    "[aria-busy='true'], "
+    "[class*='loading' i], "
+    "[class*='spinner' i], "
+    "[class*='skeleton' i], "
+    "[class*='placeholder' i]"
+)
+
+# URL substrings/paths that signal a redirect to a login/sign-in page.
+_LOGIN_URL_PATTERN = re.compile(
+    r"(?:^|[/?#&])(?:login|log-in|signin|sign-in|auth/(?:login|signin))",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -101,6 +132,9 @@ class LivePlaywrightOperator:
         evidence_dir: Path | None = None,
         database: FigureDatabase | None = None,
         headed: bool = True,
+        editor_ready_timeout_seconds: float = DEFAULT_EDITOR_READY_TIMEOUT_SECONDS,
+        editor_ready_poll_interval_seconds: float = 0.25,
+        editor_ready_diagnostic_interval_seconds: float = 3.0,
     ) -> None:
         self.profile_dir = profile_dir or settings.session_dir / "biorender-profile"
         self.evidence_dir = evidence_dir or settings.live_figure_dir
@@ -123,6 +157,21 @@ class LivePlaywrightOperator:
         self._profile_versions: dict[str, str] = {}
         self._current_figure_id: str | None = None
         self._attempt = 1
+        if editor_ready_timeout_seconds <= 0:
+            raise ValueError("editor_ready_timeout_seconds must be > 0")
+        if editor_ready_poll_interval_seconds <= 0:
+            raise ValueError("editor_ready_poll_interval_seconds must be > 0")
+        self._editor_ready_timeout_seconds = float(editor_ready_timeout_seconds)
+        self._editor_ready_poll_interval_seconds = float(
+            editor_ready_poll_interval_seconds
+        )
+        self._editor_ready_diagnostic_interval_seconds = float(
+            editor_ready_diagnostic_interval_seconds
+        )
+        # Overridable for tests that need to advance a virtual clock without
+        # actually sleeping for the full 30-second production timeout.
+        self._clock: Any = time.monotonic
+        self._sleep: Any = time.sleep
 
     @staticmethod
     def require_playwright() -> Any:
@@ -201,6 +250,13 @@ class LivePlaywrightOperator:
                 },
             )
         except OperatorError as error:
+            if isinstance(error, EditorPrepareFailed):
+                # EditorPrepareFailed already captured a targeted screenshot in
+                # its metadata (or best-effort None); avoid a redundant
+                # full-page screenshot but preserve the recorded path on the
+                # error for legacy callers.
+                error.screenshot_path = error.metadata.get("screenshot_path")
+                raise
             suffix = (
                 "blocked-by-policy"
                 if isinstance(error, PolicyBlocked)
@@ -506,18 +562,46 @@ class LivePlaywrightOperator:
 
     def _open_editor(self, action: GuiAction) -> LiveActionEvidence:
         page = self._page
-        page.goto(action.arguments["url"], wait_until="domcontentloaded", timeout=60_000)
-        page.wait_for_timeout(1500)
-        if self._authentication_visible():
-            raise AuthenticationRequired(
-                "BioRender requires manual login. Run browser-login, authenticate in the "
-                "visible window, then resume. The agent never enters credentials."
+        requested_url = action.arguments["url"]
+        override_timeout = action.arguments.get("editor_ready_timeout_seconds")
+        timeout_seconds = (
+            float(override_timeout)
+            if override_timeout is not None
+            else self._editor_ready_timeout_seconds
+        )
+        if timeout_seconds <= 0:
+            raise ValueError("editor_ready_timeout_seconds override must be > 0")
+        try:
+            page.goto(
+                requested_url,
+                wait_until="domcontentloaded",
+                timeout=max(1_000, int(timeout_seconds * 1_000)),
             )
-        if self._canvas_locator() is None:
-            raise UiLayoutChanged(
-                "No BioRender canvas was detected. Open a disposable blank Figure manually "
-                "and pass its complete editor URL."
-            )
+        except Exception as error:  # PlaywrightTimeoutError or transport errors
+            if self._is_navigation_timeout(error):
+                raise EditorPrepareFailed(
+                    (
+                        f"Navigation to {requested_url!r} did not reach DOMContentLoaded "
+                        f"within {timeout_seconds:.1f}s"
+                    ),
+                    subcode="navigation_timeout",
+                    metadata=self._editor_prepare_metadata(
+                        action,
+                        timeout_seconds=timeout_seconds,
+                        requested_url=requested_url,
+                        observed_url=self._safe_page_url(default=requested_url),
+                        loading_indicator_observed=False,
+                        suffix="editor-prepare-navigation_timeout",
+                    ),
+                ) from error
+            raise
+
+        wait_summary = self._wait_for_editor_ready(
+            action,
+            requested_url=requested_url,
+            timeout_seconds=timeout_seconds,
+        )
+
         profile, profile_path = BioRenderUiCalibrator(
             page,
             database=self.database,
@@ -540,8 +624,211 @@ class LivePlaywrightOperator:
                 "ui_profile_version": profile.ui_profile_version,
                 "profile_path": str(profile_path),
                 "canvas_locator_observed": canvas is not None,
+                "editor_ready_wait": wait_summary,
             },
         )
+
+    def _wait_for_editor_ready(
+        self,
+        action: GuiAction,
+        *,
+        requested_url: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        """Poll the page until the BioRender editor canvas becomes interactive.
+
+        Instead of sleeping for a fixed interval and then making a single
+        pass/fail decision, this waits up to ``timeout_seconds`` and returns as
+        soon as the canvas becomes visible. Meanwhile it classifies observable
+        failure modes distinctly (login redirect, off-domain redirect, page
+        closed) so callers can react without collapsing everything into
+        ``canvas_not_found``.
+        """
+
+        start = float(self._clock())
+        deadline = start + float(timeout_seconds)
+        last_diagnostic = start
+        loading_indicator_observed = False
+        observed_url = requested_url
+
+        def _raise(subcode: str, message: str) -> None:
+            raise EditorPrepareFailed(
+                message,
+                subcode=subcode,
+                metadata=self._editor_prepare_metadata(
+                    action,
+                    timeout_seconds=timeout_seconds,
+                    requested_url=requested_url,
+                    observed_url=observed_url,
+                    loading_indicator_observed=loading_indicator_observed,
+                    suffix=f"editor-prepare-{subcode}",
+                ),
+            )
+
+        while True:
+            if self._page is None or self._page_is_closed():
+                _raise(
+                    "page_closed",
+                    "BioRender page was closed before the editor became ready",
+                )
+
+            observed_url = self._safe_page_url(default=observed_url)
+
+            if self._url_looks_like_login(observed_url) or self._authentication_visible():
+                _raise(
+                    "redirected_to_login",
+                    f"BioRender navigated to a login/sign-in page: {observed_url!r}",
+                )
+
+            if not self._url_on_expected_domain(observed_url, requested_url):
+                _raise(
+                    "redirected_off_domain",
+                    (
+                        f"BioRender navigated off the expected domain: "
+                        f"observed={observed_url!r}, requested={requested_url!r}"
+                    ),
+                )
+
+            canvas = self._canvas_locator()
+            if canvas is not None:
+                elapsed = float(self._clock()) - start
+                logger.info(
+                    "biorender.editor_ready observed after %.2fs "
+                    "(loading_indicator_seen=%s, observed_url=%s)",
+                    elapsed,
+                    loading_indicator_observed,
+                    observed_url,
+                )
+                return {
+                    "timeout_seconds": float(timeout_seconds),
+                    "requested_url": requested_url,
+                    "observed_url": observed_url,
+                    "loading_indicator_observed": loading_indicator_observed,
+                    "wait_elapsed_seconds": elapsed,
+                }
+
+            if self._loading_indicator_visible():
+                loading_indicator_observed = True
+
+            now = float(self._clock())
+            if now >= deadline:
+                _raise(
+                    "canvas_not_found",
+                    (
+                        f"BioRender editor canvas did not appear within "
+                        f"{timeout_seconds:.1f}s"
+                    ),
+                )
+
+            if now - last_diagnostic >= self._editor_ready_diagnostic_interval_seconds:
+                logger.info(
+                    "biorender.editor_wait elapsed=%.1fs/%.1fs "
+                    "loading_indicator_seen=%s observed_url=%s",
+                    now - start,
+                    timeout_seconds,
+                    loading_indicator_observed,
+                    observed_url,
+                )
+                last_diagnostic = now
+
+            self._sleep(self._editor_ready_poll_interval_seconds)
+
+    def _editor_prepare_metadata(
+        self,
+        action: GuiAction,
+        *,
+        timeout_seconds: float,
+        requested_url: str,
+        observed_url: str,
+        loading_indicator_observed: bool,
+        suffix: str,
+    ) -> dict[str, Any]:
+        return {
+            "timeout_seconds": float(timeout_seconds),
+            "requested_url": requested_url,
+            "observed_url": observed_url,
+            "loading_indicator_observed": bool(loading_indicator_observed),
+            "screenshot_path": self._safe_screenshot(action, suffix=suffix),
+        }
+
+    def _safe_screenshot(self, action: GuiAction, *, suffix: str) -> str | None:
+        try:
+            return str(self._screenshot(action, suffix=suffix))
+        except Exception:
+            return None
+
+    def _safe_page_url(self, *, default: str) -> str:
+        try:
+            url = self._page.url if self._page is not None else default
+        except Exception:
+            return default
+        return url if isinstance(url, str) and url else default
+
+    def _page_is_closed(self) -> bool:
+        page = self._page
+        if page is None:
+            return True
+        is_closed = getattr(page, "is_closed", None)
+        if not callable(is_closed):
+            return False
+        try:
+            return bool(is_closed())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _url_looks_like_login(url: str) -> bool:
+        if not url:
+            return False
+        return bool(_LOGIN_URL_PATTERN.search(url))
+
+    @staticmethod
+    def _url_on_expected_domain(observed: str, requested: str) -> bool:
+        try:
+            observed_parts = urlparse(observed)
+            requested_parts = urlparse(requested)
+        except Exception:
+            return True
+        scheme = (observed_parts.scheme or "").lower()
+        if scheme not in {"http", "https"}:
+            # file://, about:, chrome-error:// etc. — cannot classify as
+            # off-domain; leave the decision to other checks.
+            return True
+        host = (observed_parts.hostname or "").lower()
+        if not host:
+            return True
+        if host.endswith("biorender.com"):
+            return True
+        requested_host = (requested_parts.hostname or "").lower()
+        if requested_host and host == requested_host:
+            return True
+        return False
+
+    def _loading_indicator_visible(self) -> bool:
+        page = self._page
+        if page is None:
+            return False
+        try:
+            locator = page.locator(EDITOR_LOADING_INDICATOR_SELECTOR)
+            count = min(locator.count(), 20)
+        except Exception:
+            return False
+        for index in range(count):
+            try:
+                candidate = locator.nth(index)
+                if candidate.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _is_navigation_timeout(error: BaseException) -> bool:
+        name = type(error).__name__.lower()
+        if "timeout" in name:
+            return True
+        message = str(error).lower()
+        return "timeout" in message and "navigat" in message
 
     def _search_asset(self, action: GuiAction) -> LiveActionEvidence:
         queries = [action.arguments["query"], *action.arguments.get("fallback_queries", [])]
