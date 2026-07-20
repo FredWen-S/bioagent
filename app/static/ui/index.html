@@ -101,6 +101,9 @@
           <label><input type="radio" name="task-mode" value="preset" checked> 预设任务</label>
           <label><input type="radio" name="task-mode" value="prompt"> Prompt 输入</label>
         </fieldset>
+        <div class="prompt-sequence" aria-label="第三步操作顺序">
+          <strong>解析需求</strong><span>→</span><strong>查看任务摘要</strong><span>→</span><strong>进入执行</strong>
+        </div>
         <div id="preset-panel" class="task-mode-panel">
           <label class="choice-card"><input type="radio" name="preset" value="pd1" checked><span><strong>PD-1 / PD-L1 示例</strong><small>验证素材、标签、连接和布局的完整流程。</small></span></label>
         </div>
@@ -109,9 +112,10 @@
           <textarea id="prompt-input" rows="7" maxlength="3000" placeholder="例如：绘制 PD-1 与 PD-L1 结合并抑制 T 细胞活化的机制图，左到右布局，标出关键分子。"></textarea>
           <div class="field-meta"><span>示例：绘制一个从配体结合到信号抑制的左到右机制图。</span><span id="prompt-count">0 / 3000</span></div>
         </div>
-        <div class="action-row">
+        <p class="safety-note prompt-safety-note">预设任务和自定义 Prompt 都会先生成可审计的任务计划，确认摘要后再进入真实执行。</p>
+        <div class="action-row prompt-parse-action">
           <button id="parse-prompt" class="button button-primary" type="button">解析需求</button>
-          <button id="start-dry" class="button button-secondary" type="button" disabled>运行安全预演</button>
+          <span id="prompt-guidance" class="field-message" aria-live="polite">请先解析绘图需求。</span>
         </div>
         <div id="plan-summary" class="plan-summary" hidden>
           <div class="summary-header"><strong>系统解析后的任务摘要</strong><span id="plan-support-status"></span></div>
@@ -122,15 +126,7 @@
           </div>
           <p><strong>布局：</strong><span id="summary-layout">-</span></p>
           <p><strong>风险或不支持内容：</strong><span id="summary-risks">无</span></p>
-        </div>
-        <div id="dry-run-review" class="review-callout" hidden>
-          <strong>安全预演已完成，未操作真实 BioRender 页面。</strong>
-          <p>必须先完成并确认安全预演结果，才允许进入真实执行。</p>
-          <p id="dry-run-review-message">请确认预演结果后继续。</p>
-          <div class="action-row">
-            <button id="confirm-dry-run" class="button button-primary" type="button" disabled>确认预演结果并继续</button>
-            <button id="edit-prompt" class="button button-quiet" type="button">返回修改</button>
-          </div>
+          <p class="safety-note">查看任务摘要后即可进入执行步骤。真实执行仍会再次要求空白画布和 Live 确认。</p>
         </div>
       </article>
 
@@ -213,6 +209,7 @@
   </main>
 
   <div class="bottom-actions" role="toolbar" aria-label="步骤操作">
+    <span id="next-step-hint" class="next-step-hint" aria-live="polite"></span>
     <button id="previous-step" class="button button-secondary" type="button">上一步</button>
     <button id="next-step" class="button button-primary" type="button">下一步</button>
     <button id="safe-stop" class="button button-danger" type="button" disabled>安全停止</button>

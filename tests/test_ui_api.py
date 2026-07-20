@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from app.api.main import handle_ui_service_error
 from app.api.ui_routes import create_ui_router
 from app.schemas.figure_spec import FigureStatus
 from app.schemas.ui import UiTaskInput
@@ -100,11 +101,192 @@ def client(ui_service: FigureExecutionService) -> TestClient:
             content={
                 "error_code": error.error_code,
                 "message": str(error),
+                "diagnostic_hint": error.diagnostic_hint,
                 "details": error.details,
             },
         )
 
     return TestClient(app)
+
+
+class _LoginPage:
+    def __init__(self) -> None:
+        self.closed = threading.Event()
+        self.url = "https://app.biorender.com/"
+
+    def goto(self, url: str, **_kwargs: object) -> None:
+        self.url = url
+
+    def is_closed(self) -> bool:
+        return self.closed.is_set()
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        if self.closed.wait(milliseconds / 1000):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+
+class _LoginOperator:
+    def __init__(self, page: _LoginPage) -> None:
+        self.page = page
+        self.close_called = False
+
+    def close(self) -> None:
+        self.close_called = True
+
+
+class _LoginOperatorFactory:
+    def __init__(self) -> None:
+        self.operators: list[_LoginOperator] = []
+
+    def __call__(self, _database: FigureDatabase) -> _LoginOperator:
+        operator = _LoginOperator(_LoginPage())
+        self.operators.append(operator)
+        return operator
+
+
+def _production_login_client(service: FigureExecutionService) -> TestClient:
+    login_app = FastAPI()
+    login_app.include_router(create_ui_router(service))
+    login_app.add_exception_handler(UiServiceError, handle_ui_service_error)
+    return TestClient(login_app)
+
+
+def _stop_login_job(service: FigureExecutionService, job_id: str) -> None:
+    service.request_job_stop(job_id)
+    service._threads[job_id].join(timeout=2)
+    assert service.get_job(job_id)["status"] == "stopped"
+
+
+def test_manual_login_api_route_enters_waiting_wizard_state(tmp_path: Path) -> None:
+    factory = _LoginOperatorFactory()
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-route.sqlite3"),
+        live_operator_factory=factory,
+    )
+    response = _production_login_client(service).post(
+        "/api/ui/login/open",
+        json={"confirm_manual_login": True},
+    )
+    assert response.status_code == 202
+    job = response.json()
+    assert job["kind"] == "manual_login"
+    assert job["status"] == "waiting_user"
+    assert service.system_status()["active_jobs"][0]["id"] == job["id"]
+    workflow = service.workflow_state()
+    assert workflow["state"] == "login_checking"
+    assert workflow["step"] == 1
+    _stop_login_job(service, str(job["id"]))
+
+
+def test_manual_login_startup_failure_returns_actionable_error(tmp_path: Path) -> None:
+    def missing_chromium(_database: FigureDatabase) -> _LoginOperator:
+        raise RuntimeError(
+            "Executable doesn't exist. Please run playwright install chromium"
+        )
+
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-failure.sqlite3"),
+        live_operator_factory=missing_chromium,
+    )
+    response = _production_login_client(service).post(
+        "/api/ui/login/open",
+        json={"confirm_manual_login": True},
+    )
+    assert response.status_code == 503
+    assert response.json() == {
+        "error_code": "CHROMIUM_NOT_INSTALLED",
+        "message": "Chromium 未安装，无法打开人工登录窗口。",
+        "diagnostic_hint": (
+            "请在启动 Web UI 的同一 Python 环境运行："
+            "python -m playwright install chromium"
+        ),
+        "details": None,
+    }
+    assert service.system_status()["active_jobs"] == []
+
+
+@pytest.mark.parametrize(
+    ("raw_error", "expected_status", "expected_code"),
+    [
+        (
+            "user data directory is already in use by another process",
+            409,
+            "BROWSER_PROFILE_IN_USE",
+        ),
+        ("CreateProcess failed: Access is denied", 503, "PLAYWRIGHT_LAUNCH_FAILED"),
+        (
+            "Target page, context or browser has been closed",
+            409,
+            "LOGIN_WINDOW_CLOSED",
+        ),
+    ],
+)
+def test_manual_login_launch_errors_are_classified(
+    tmp_path: Path,
+    raw_error: str,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    def failed_launch(_database: FigureDatabase) -> _LoginOperator:
+        raise RuntimeError(raw_error)
+
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / f"{expected_code}.sqlite3"),
+        live_operator_factory=failed_launch,
+    )
+    response = _production_login_client(service).post(
+        "/api/ui/login/open",
+        json={"confirm_manual_login": True},
+    )
+    assert response.status_code == expected_status
+    assert response.json()["error_code"] == expected_code
+    assert response.json()["diagnostic_hint"]
+    assert service.system_status()["active_jobs"] == []
+
+
+def test_closing_login_window_releases_browser_busy(tmp_path: Path) -> None:
+    factory = _LoginOperatorFactory()
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-close.sqlite3"),
+        live_operator_factory=factory,
+    )
+    job = service.start_manual_login()
+    factory.operators[0].page.closed.set()
+    service._threads[str(job["id"])].join(timeout=2)
+    failed = service.get_job(str(job["id"]))
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "LOGIN_WINDOW_CLOSED"
+    assert "重新点击" in str(failed["diagnostic_hint"])
+    assert service.system_status()["active_jobs"] == []
+    service._ensure_browser_available()
+
+
+def test_manual_login_safe_stop_allows_reopen(tmp_path: Path) -> None:
+    factory = _LoginOperatorFactory()
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-reopen.sqlite3"),
+        live_operator_factory=factory,
+    )
+    first = service.start_manual_login()
+    _stop_login_job(service, str(first["id"]))
+    second = service.start_manual_login()
+    assert second["id"] != first["id"]
+    assert second["status"] == "waiting_user"
+    _stop_login_job(service, str(second["id"]))
+
+
+def test_repeated_manual_login_does_not_start_two_browsers(tmp_path: Path) -> None:
+    factory = _LoginOperatorFactory()
+    service = FigureExecutionService(
+        FigureDatabase(tmp_path / "login-duplicate.sqlite3"),
+        live_operator_factory=factory,
+    )
+    first = service.start_manual_login()
+    with pytest.raises(UiServiceError) as raised:
+        service.start_manual_login()
+    assert raised.value.error_code == "LOGIN_JOB_ALREADY_ACTIVE"
+    assert len(factory.operators) == 1
+    _stop_login_job(service, str(first["id"]))
 
 
 def test_status_and_presets_are_user_safe(client: TestClient) -> None:
@@ -155,6 +337,65 @@ def test_prompt_must_be_parsed_before_dry_run(client: TestClient) -> None:
     )
     assert response.status_code == 409
     assert response.json()["error_code"] == "PLAN_REQUIRED"
+
+
+def test_prompt_step_backend_state_allows_direct_execution_after_parse(
+    ui_service: FigureExecutionService,
+) -> None:
+    required = ui_service.workflow_state()
+    assert required["state"] == "prompt_required"
+    assert required["step3_phase"] == "parse_required"
+    assert required["next_block_reason"] == "请先解析绘图需求"
+
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    parsed = ui_service.workflow_state(plan_id=str(plan["run_id"]))
+    assert parsed["step3_phase"] == "parsed"
+    assert parsed["next_block_reason"] == ""
+    assert parsed["buttons"]["start_live"] is True
+
+
+def test_custom_prompt_can_enter_direct_execution_after_plan(client: TestClient) -> None:
+    task = {
+        "mode": "prompt",
+        "preset_id": None,
+        "prompt": "绘制 PD-1 与 PD-L1 结合并抑制 T 细胞活化的机制图，使用左到右布局",
+        "custom": None,
+    }
+    plan = _parsed_plan(client, task)
+    workflow = client.get(
+        "/api/ui/workflow-state",
+        params={"plan_id": plan["run_id"]},
+    ).json()
+    assert workflow["state"] == "prompt_parsed"
+    assert workflow["buttons"]["start_live"] is True
+
+
+def test_live_run_can_start_from_parsed_plan_without_dry_run(
+    ui_service: FigureExecutionService,
+) -> None:
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    running = threading.Event()
+
+    def hold_live_job(job_id: str) -> None:
+        job = ui_service._jobs[job_id]
+        ui_service._update_job(job, "running", "test running")
+        running.set()
+        job.stop_event.wait(timeout=2)
+        ui_service._update_job(job, "stopped", "test stopped")
+
+    ui_service._run_live_job = hold_live_job  # type: ignore[method-assign]
+    job = ui_service.start_live(
+        task,
+        "https://app.biorender.com/figure/disposable",
+        plan_id=str(plan["run_id"]),
+        dry_run_id=None,
+    )
+    assert running.wait(timeout=1)
+    assert job["kind"] == "live_figure"
+    ui_service.request_job_stop(str(job["id"]))
+    ui_service._threads[str(job["id"])].join(timeout=2)
 
 
 def test_dry_run_uses_existing_workflow(client: TestClient) -> None:
@@ -364,6 +605,7 @@ def test_unknown_run_has_stable_error(client: TestClient) -> None:
     assert response.json() == {
         "error_code": "RUN_NOT_FOUND",
         "message": "未找到绘图任务。",
+        "diagnostic_hint": None,
         "details": None,
     }
 

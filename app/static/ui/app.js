@@ -9,8 +9,6 @@ const stateLabels = {
   canvas_validating: "正在检查画布",
   prompt_required: "需要绘图需求",
   prompt_parsed: "需求已解析",
-  dry_running: "正在安全预演",
-  dry_run_confirmation_required: "等待预演确认",
   ready_to_execute: "可以开始执行",
   executing: "正在执行",
   stop_requested: "正在安全停止",
@@ -49,8 +47,6 @@ const state = {
   canvasVerified: false,
   planId: null,
   planFingerprint: null,
-  dryRunId: null,
-  confirmedDryRunId: null,
   runId: null,
   currentJobId: null,
   currentJobStatus: null,
@@ -82,6 +78,11 @@ function showToast(message, isError = false) {
   showToast.timer = window.setTimeout(() => { toast.hidden = true; }, 4200);
 }
 
+function diagnosticMessage(payload, fallback = "请求失败，请稍后重试。") {
+  const message = payload?.message || fallback;
+  return payload?.diagnostic_hint ? `${message} ${payload.diagnostic_hint}` : message;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -89,8 +90,9 @@ async function api(path, options = {}) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    const error = new Error(payload?.message || "请求失败，请稍后重试。");
+    const error = new Error(diagnosticMessage(payload));
     error.code = payload?.error_code || "REQUEST_FAILED";
+    error.diagnosticHint = payload?.diagnostic_hint || null;
     error.details = payload?.details || null;
     throw error;
   }
@@ -107,8 +109,6 @@ function saveState() {
     canvasVerified: state.canvasVerified,
     planId: state.planId,
     planFingerprint: state.planFingerprint,
-    dryRunId: state.dryRunId,
-    confirmedDryRunId: state.confirmedDryRunId,
     runId: state.runId,
     currentJobId: state.currentJobId
   }));
@@ -162,16 +162,47 @@ function renderWorkflow(workflow) {
     setText("summary-relations", workflow.plan_summary.relation_count || 0);
     setText("summary-layout", workflow.plan_summary.layout_description || "-");
     setText("summary-risks", workflow.plan_summary.risks?.length ? workflow.plan_summary.risks.join("；") : "无");
+    setText("plan-support-status", workflow.plan_summary.supported === false ? "需要返回修改" : "需求解析通过");
+    byId("plan-support-status").className = workflow.plan_summary.supported === false ? "status-badge danger" : "status-badge success";
   }
   setText("state-label", stateLabels[workflow.state] || workflow.state || "状态未知");
   setText("state-reason", workflow.reason || "");
   setText("next-action", workflow.next_action ? `下一步：${workflow.next_action}` : "");
+  renderPromptGuidance(workflow);
+  renderPromptPhases(workflow);
   setStatusBadge("login-state", state.environment?.browser_login === "verified" ? "已确认" : state.environment?.browser_login === "waiting_user" ? "等待用户登录" : "未检查");
   setStatusBadge("canvas-state", state.canvasVerified ? "已确认" : "未检查");
   setStatusBadge("prompt-state", state.planId ? "已解析" : "未解析");
   setStatusBadge("execution-state", stateLabels[workflow.state] || "未开始");
   if (workflow.state === "completed" || workflow.state === "completed_with_unknown") setStatusBadge("result-state", stateLabels[workflow.state]);
   updateControls();
+}
+
+function renderPromptGuidance(workflow) {
+  const guidance = {
+    prompt_required: "请先解析绘图需求。",
+    prompt_parsed: "需求已解析。查看任务摘要后即可进入执行步骤。",
+    ready_to_execute: "需求已解析，已进入执行步骤。"
+  }[workflow.state];
+  if (guidance) setText("prompt-guidance", guidance);
+  setText(
+    "next-step-hint",
+    state.step === 3 && workflow.next_block_reason ? workflow.next_block_reason : ""
+  );
+}
+
+function renderPromptPhases(workflow) {
+  const currentIndex = {
+    prompt_required: 0,
+    prompt_parsed: 2,
+    ready_to_execute: 5
+  }[workflow.state];
+  if (currentIndex === undefined) return;
+  queryAll("[data-prompt-phase]").forEach((phase, index) => {
+    phase.dataset.status = index < currentIndex ? "completed" : index === currentIndex ? "current" : "pending";
+    const label = phase.querySelector("small");
+    if (label) label.textContent = index < currentIndex ? "已完成" : index === currentIndex ? "当前" : "等待";
+  });
 }
 
 function setStatusBadge(id, text) {
@@ -194,11 +225,10 @@ function buildTask() {
 function invalidatePlan() {
   state.planId = null;
   state.planFingerprint = null;
-  state.dryRunId = null;
-  state.confirmedDryRunId = null;
   state.planSummary = null;
   byId("plan-summary").hidden = true;
-  byId("dry-run-review").hidden = true;
+  setText("prompt-guidance", "请先解析绘图需求。");
+  renderPromptPhases({ state: "prompt_required" });
   saveState();
   updateControls();
 }
@@ -214,8 +244,11 @@ function renderPlan(plan) {
   setText("summary-relations", summary.relation_count || 0);
   setText("summary-layout", summary.layout_description || "-");
   setText("summary-risks", summary.risks?.length ? summary.risks.join("；") : "无");
-  setText("plan-support-status", summary.supported === false ? "需要返回修改" : "可执行");
+  setText("plan-support-status", summary.supported === false ? "需要返回修改" : "需求解析通过");
   byId("plan-support-status").className = summary.supported === false ? "status-badge danger" : "status-badge success";
+  setText("prompt-guidance", summary.supported === false
+    ? "当前需求需要返回修改。"
+    : "需求已解析。查看任务摘要后即可进入执行步骤。");
   saveState();
   updateControls();
 }
@@ -306,14 +339,7 @@ function finalStatus(summary) {
 
 function renderSummary(summary) {
   state.summary = summary;
-  if (summary.run_mode === "dry_run") {
-    state.dryRunId = summary.run_id;
-    byId("dry-run-review").hidden = false;
-    byId("confirm-dry-run").disabled = !summary.can_confirm_dry_run;
-    setText("dry-run-review-message", summary.dry_run_confirmed ? "该预演已确认，可以进入真实执行。" : "请检查任务摘要，再确认预演结果。");
-  } else {
-    state.runId = summary.run_id;
-  }
+  state.runId = summary.run_id;
   const displayStatus = finalStatus(summary);
   setText("result-status", displayStatus);
   setText("result-run-id", summary.run_id);
@@ -369,7 +395,11 @@ function setJob(job) {
   state.currentJobStatus = job.status;
   state.currentJobKind = job.kind;
   if (job.figure_id) state.runId = job.figure_id;
-  byId("job-message").textContent = job.message || "后台任务正在运行。";
+  const message = diagnosticMessage(job, "后台任务正在运行。");
+  byId("job-message").textContent = message;
+  if (job.kind === "manual_login") {
+    byId("login-message").textContent = message;
+  }
   setText("elapsed-time", `${job.elapsed_seconds || 0} 秒`);
   saveState();
   updateControls();
@@ -409,7 +439,10 @@ async function pollJob() {
         setStep(4, { persist: false });
       }
       await refreshEnvironment();
-      showToast(job.message || "后台任务已结束", job.status === "failed" || job.status === "blocked");
+      showToast(
+        diagnosticMessage(job, "后台任务已结束"),
+        job.status === "failed" || job.status === "blocked"
+      );
     } else {
       state.busy = true;
       continuePolling = true;
@@ -434,7 +467,6 @@ async function pollJob() {
 async function refreshWorkflow() {
   const query = new URLSearchParams();
   if (state.planId) query.set("plan_id", state.planId);
-  if (state.dryRunId) query.set("dry_run_id", state.dryRunId);
   if (state.runId) query.set("run_id", state.runId);
   try {
     const workflow = await api(`/api/ui/workflow-state?${query.toString()}`);
@@ -442,8 +474,6 @@ async function refreshWorkflow() {
   } catch (error) {
     if (error.code === "RUN_NOT_FOUND") {
       state.runId = null;
-      state.dryRunId = null;
-      state.confirmedDryRunId = null;
       saveState();
     }
   }
@@ -478,8 +508,6 @@ async function refreshEnvironment() {
     }
     if (state.runId && !state.currentJobId) {
       await loadRun(state.runId).catch(() => {});
-    } else if (state.dryRunId && !state.currentJobId) {
-      await loadRun(state.dryRunId).catch(() => {});
     }
     updateControls();
     await refreshWorkflow();
@@ -490,6 +518,8 @@ async function refreshEnvironment() {
 }
 
 async function openLogin() {
+  if (state.busy) return;
+  setBusy(true);
   try {
     const job = await api("/api/ui/login/open", { method: "POST", body: JSON.stringify({ confirm_manual_login: true }) });
     setJob(job);
@@ -497,7 +527,11 @@ async function openLogin() {
     byId("login-message").textContent = "请在新浏览器窗口中手动登录 BioRender，完成后回来检查状态。";
     scheduleJobPoll();
     await refreshWorkflow();
-  } catch (error) { showToast(error.message, true); }
+  } catch (error) {
+    setBusy(false);
+    byId("login-message").textContent = error.message;
+    showToast(error.message, true);
+  }
 }
 
 async function completeLogin() {
@@ -506,7 +540,10 @@ async function completeLogin() {
     setJob(job);
     state.busy = true;
     scheduleJobPoll();
-  } catch (error) { showToast(error.message, true); }
+  } catch (error) {
+    byId("login-message").textContent = error.message;
+    showToast(error.message, true);
+  }
 }
 
 async function checkCanvas() {
@@ -541,7 +578,7 @@ async function parsePrompt() {
   try {
     const plan = await api("/api/ui/plans", { method: "POST", body: JSON.stringify({ task }) });
     renderPlan(plan);
-    setText("job-message", "需求已解析。请检查摘要后运行安全预演。");
+    setText("job-message", "需求已解析。请检查任务摘要后进入执行步骤。");
     showToast("需求解析完成。");
     await refreshWorkflow();
   } catch (error) {
@@ -549,47 +586,11 @@ async function parsePrompt() {
   } finally { setBusy(false); }
 }
 
-async function startDryRun() {
-  if (!state.planId) return;
-  setBusy(true);
-  state.workflow = { state: "dry_running", step: 3, reason: "正在执行安全预演。", next_action: "等待预演完成" };
-  renderWorkflow(state.workflow);
-  try {
-    const summary = await api("/api/ui/dry-run", { method: "POST", body: JSON.stringify({ plan_id: state.planId, task: buildTask() }) });
-    renderSummary(summary);
-    state.dryRunId = summary.run_id;
-    state.busy = false;
-    byId("dry-run-review").hidden = false;
-    byId("dry-run-review-message").textContent = "安全预演已完成，未操作真实 BioRender 页面。请检查摘要并确认。";
-    setStep(3, { persist: false });
-    await refreshWorkflow();
-    showToast("安全预演已完成，等待确认。");
-  } catch (error) {
-    state.busy = false;
-    showToast(error.message, true);
-  } finally { updateControls(); }
-}
-
-async function confirmDryRun() {
-  if (!state.dryRunId || state.busy) return;
-  setBusy(true);
-  try {
-    const summary = await api(`/api/ui/runs/${encodeURIComponent(state.dryRunId)}/confirm-dry-run`, { method: "POST", body: "{}" });
-    state.confirmedDryRunId = summary.run_id;
-    renderSummary(summary);
-    setText("dry-run-review-message", "安全预演结果已确认，可以开始真实执行。");
-    setStep(4, { persist: false });
-    await refreshWorkflow();
-    showToast("安全预演结果已确认。");
-  } catch (error) { showToast(error.message, true); }
-  finally { setBusy(false); }
-}
-
 function livePayload() {
   return {
     editor_url: state.canvasUrl.trim(),
     task: buildTask(),
-    dry_run_id: state.confirmedDryRunId,
+    plan_id: state.planId,
     confirmed_disposable: true,
     confirm_live: true,
     enable_biorender_ai: false
@@ -597,7 +598,7 @@ function livePayload() {
 }
 
 async function startLive() {
-  if (state.busy || !state.confirmedDryRunId) return;
+  if (state.busy || !state.planId) return;
   setBusy(true);
   try {
     const job = await api("/api/ui/live-runs", { method: "POST", body: JSON.stringify(livePayload()) });
@@ -652,8 +653,6 @@ async function newTask() {
   state.canvasVerified = false;
   state.planId = null;
   state.planFingerprint = null;
-  state.dryRunId = null;
-  state.confirmedDryRunId = null;
   state.runId = null;
   state.currentJobId = null;
   state.summary = null;
@@ -668,23 +667,27 @@ async function newTask() {
 
 function updateControls() {
   const workflowState = state.workflow?.state || "login_required";
+  const backendButtons = state.workflow?.buttons || {};
   const hasPrompt = state.taskMode === "preset" || state.prompt.trim().length >= 3;
   const running = state.busy || ["login_checking", "canvas_validating", "executing", "stop_requested", "verifying"].includes(workflowState);
   byId("open-login").disabled = state.busy || workflowState !== "login_required";
   byId("complete-login").disabled = !state.currentJobId || state.currentJobKind !== "manual_login" || state.currentJobStatus !== "waiting_user";
   byId("check-canvas").disabled = state.busy || workflowState !== "canvas_required" || !state.canvasUrl || !state.blankCanvasConfirmed;
-  byId("parse-prompt").disabled = state.busy || workflowState !== "prompt_required" || !hasPrompt;
-  byId("start-dry").disabled = state.busy || !state.planId || workflowState !== "prompt_parsed";
-  byId("confirm-dry-run").disabled = state.busy || !state.dryRunId || workflowState !== "dry_run_confirmation_required";
-  byId("start-live").disabled = state.busy || workflowState !== "ready_to_execute" || !state.confirmedDryRunId;
-  byId("resume-run").disabled = state.busy || workflowState !== "paused";
+  byId("parse-prompt").disabled = state.busy || backendButtons.parse_prompt !== true || !hasPrompt;
+  byId("start-live").disabled = state.busy || backendButtons.start_live !== true;
+  byId("resume-run").disabled = state.busy || backendButtons.resume !== true;
   byId("safe-stop").disabled = !state.currentJobId && !state.runId || !["login_checking", "canvas_validating", "executing", "stop_requested", "verifying", "paused"].includes(workflowState);
   byId("previous-step").disabled = state.busy || state.step <= 1;
   const canGoNext = (state.step === 1 && state.environment?.browser_login === "verified")
     || (state.step === 2 && state.canvasVerified)
-    || (state.step === 3 && Boolean(state.confirmedDryRunId))
+    || (state.step === 3 && state.workflow?.state === "prompt_parsed" && Boolean(state.planId))
     || (state.step === 4 && Boolean(state.summary));
   byId("next-step").disabled = state.busy || state.step >= 5 || !canGoNext;
+  if (state.step === 3 && !state.busy && !canGoNext && state.workflow?.next_block_reason) {
+    setText("next-step-hint", state.workflow.next_block_reason);
+  } else if (state.step !== 3 || state.busy || canGoNext) {
+    setText("next-step-hint", "");
+  }
   document.querySelector(".bottom-actions").classList.toggle("running", running);
   byId("run-canvas").textContent = state.canvasUrl || "未指定";
   byId("run-task").textContent = state.planSummary ? `${state.planSummary.asset_count || 0} 个素材，${state.planSummary.relation_count || 0} 条连接` : "未解析";
@@ -697,7 +700,7 @@ function goNext() {
   if (state.busy) return;
   if (state.step === 1 && state.environment?.browser_login === "verified") return setStep(2);
   if (state.step === 2 && state.canvasVerified) return setStep(3);
-  if (state.step === 3 && state.confirmedDryRunId) return setStep(4);
+  if (state.step === 3 && state.planId && state.workflow?.state === "prompt_parsed") return setStep(4);
   if (state.step === 4 && state.summary) return setStep(5);
   showToast(state.workflow?.reason || "请先完成当前步骤。", true);
 }
@@ -734,9 +737,6 @@ byId("open-login").addEventListener("click", openLogin);
 byId("complete-login").addEventListener("click", completeLogin);
 byId("check-canvas").addEventListener("click", checkCanvas);
 byId("parse-prompt").addEventListener("click", parsePrompt);
-byId("start-dry").addEventListener("click", startDryRun);
-byId("confirm-dry-run").addEventListener("click", confirmDryRun);
-byId("edit-prompt").addEventListener("click", () => { invalidatePlan(); setStep(3); });
 byId("start-live").addEventListener("click", startLive);
 byId("safe-stop").addEventListener("click", safeStop);
 byId("resume-run").addEventListener("click", resumeRun);

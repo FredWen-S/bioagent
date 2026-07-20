@@ -118,6 +118,7 @@ def create_ui_router(service: FigureExecutionService) -> APIRouter:
         return service.start_live(
             payload.task,
             payload.editor_url,
+            plan_id=payload.plan_id,
             dry_run_id=payload.dry_run_id,
         )
 

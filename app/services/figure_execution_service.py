@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
@@ -42,6 +44,10 @@ INTERRUPTED_FIGURE_STATES = frozenset(
     }
 )
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+LOGIN_STARTUP_WAIT_SECONDS = 15.0
+LOGIN_WINDOW_POLL_SECONDS = 0.25
+
+logger = logging.getLogger(__name__)
 
 
 class UiServiceError(RuntimeError):
@@ -51,10 +57,12 @@ class UiServiceError(RuntimeError):
         message: str,
         *,
         details: dict[str, object] | None = None,
+        diagnostic_hint: str | None = None,
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.details = details
+        self.diagnostic_hint = diagnostic_hint
 
 
 @dataclass(slots=True)
@@ -65,11 +73,13 @@ class ManagedJob:
     message: str
     figure_id: str | None = None
     error_code: str | None = None
+    diagnostic_hint: str | None = None
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     result: dict[str, Any] | None = None
     input_data: dict[str, Any] = field(default_factory=dict, repr=False)
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    state_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def public(self) -> dict[str, Any]:
         started = datetime.fromisoformat(self.created_at)
@@ -83,6 +93,7 @@ class ManagedJob:
             "message": self.message,
             "figure_id": self.figure_id,
             "error_code": self.error_code,
+            "diagnostic_hint": self.diagnostic_hint,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "elapsed_seconds": max(0, round((finished - started).total_seconds())),
@@ -257,16 +268,31 @@ class FigureExecutionService:
         task: UiTaskInput,
         editor_url: str,
         *,
+        plan_id: str | None,
         dry_run_id: str | None,
     ) -> dict[str, Any]:
         self._require_login_verified()
         self._require_verified_canvas(editor_url)
-        self._require_confirmed_dry_run(dry_run_id, task)
+        if dry_run_id:
+            self._require_confirmed_dry_run(dry_run_id, task)
+        elif plan_id:
+            self._require_parsed_plan(plan_id, task)
+        else:
+            raise UiServiceError(
+                "PLAN_REQUIRED",
+                "请先解析当前绘图需求。",
+                diagnostic_hint="第三步解析成功后才能进入执行。",
+            )
         self._ensure_browser_available()
         bundle = self.plan_task(task, editor_url=editor_url)
+        event_type = (
+            "live_started_from_confirmed_dry_run"
+            if dry_run_id
+            else "live_started_from_plan"
+        )
         self.database.add_audit_event(
-            "live_started_from_confirmed_dry_run",
-            {"dry_run_id": dry_run_id},
+            event_type,
+            {"plan_id": plan_id, "dry_run_id": dry_run_id},
             figure_id=bundle.figure_spec.id,
         )
         return self.start_resume(bundle.figure_spec.id)
@@ -350,16 +376,24 @@ class FigureExecutionService:
         return job.public()
 
     def start_manual_login(self) -> dict[str, Any]:
-        self._ensure_browser_available()
-        self._login_complete.clear()
-        self._login_verified = False
-        job = ManagedJob(
-            id=f"login_job_{uuid.uuid4().hex[:12]}",
-            kind="manual_login",
-            status="queued",
-            message="正在打开人工登录窗口。",
-        )
-        self._start_thread(job, self._run_login_job)
+        with self._lock:
+            self._ensure_browser_available()
+            self._login_complete.clear()
+            self._login_verified = False
+            job = ManagedJob(
+                id=f"login_job_{uuid.uuid4().hex[:12]}",
+                kind="manual_login",
+                status="queued",
+                message="正在打开人工登录窗口。",
+            )
+            self._start_thread(job, self._run_login_job)
+        self._wait_for_manual_login_startup(job)
+        if job.status == "failed":
+            raise UiServiceError(
+                job.error_code or "PLAYWRIGHT_LAUNCH_FAILED",
+                job.message,
+                diagnostic_hint=job.diagnostic_hint,
+            )
         return job.public()
 
     def complete_manual_login(self) -> dict[str, Any]:
@@ -558,18 +592,31 @@ class FigureExecutionService:
         elif plan_id:
             state = "prompt_parsed"
             step = 3
-            reason = "需求已解析，请运行安全预演。"
-            next_action = "运行安全预演"
+            reason = "需求已解析，可以进入执行步骤。"
+            next_action = "进入执行步骤"
         else:
             state = "prompt_required"
             step = 3
             reason = "画布已检查，请选择预设或输入科研绘图需求。"
             next_action = "解析需求"
+        step3_phase = {
+            "prompt_required": "parse_required",
+            "prompt_parsed": "parsed",
+            "dry_run_confirmation_required": "confirmation_required",
+            "ready_to_execute": "confirmed",
+        }.get(state)
+        next_block_reason = {
+            "prompt_required": "请先解析绘图需求",
+            "prompt_parsed": "",
+            "dry_run_confirmation_required": "请先确认安全预演结果",
+        }.get(state, "")
         return {
             "state": state,
             "step": step,
             "reason": reason,
             "next_action": next_action,
+            "step3_phase": step3_phase,
+            "next_block_reason": next_block_reason,
             "refresh_recoverable": bool(active or plan_id or dry_run_id or run_id),
             "buttons": {
                 "open_login": state == "login_required",
@@ -578,7 +625,8 @@ class FigureExecutionService:
                 "parse_prompt": state in {"prompt_required", "prompt_parsed"},
                 "run_dry_run": state == "prompt_parsed",
                 "confirm_dry_run": state == "dry_run_confirmation_required",
-                "start_live": state == "ready_to_execute",
+                "start_live": state == "ready_to_execute"
+                or (state == "prompt_parsed" and plan_id is not None),
                 "safe_stop": state
                 in {"login_checking", "canvas_validating", "executing", "stop_requested"},
                 "resume": state == "paused",
@@ -1089,9 +1137,11 @@ class FigureExecutionService:
     def _run_login_job(self, job_id: str) -> None:
         job = self._jobs[job_id]
         self._update_job(job, "running", "正在打开人工登录窗口。")
-        operator = self._new_live_operator()
+        operator: Any | None = None
         try:
-            operator.page.goto(
+            operator = self._new_live_operator()
+            page = operator.page
+            page.goto(
                 "https://app.biorender.com/",
                 wait_until="domcontentloaded",
                 timeout=60_000,
@@ -1101,11 +1151,23 @@ class FigureExecutionService:
                 "waiting_user",
                 "请在浏览器中手动登录，完成后返回本页面确认。",
             )
-            self._login_complete.wait()
+            while not self._login_complete.is_set():
+                is_closed = getattr(page, "is_closed", None)
+                if callable(is_closed) and is_closed():
+                    raise UiServiceError(
+                        "LOGIN_WINDOW_CLOSED",
+                        "人工登录窗口已被关闭，浏览器任务已释放。",
+                        diagnostic_hint="可以重新点击“打开 BioRender 登录页面”。",
+                    )
+                wait_for_timeout = getattr(page, "wait_for_timeout", None)
+                if callable(wait_for_timeout):
+                    wait_for_timeout(int(LOGIN_WINDOW_POLL_SECONDS * 1000))
+                else:
+                    self._login_complete.wait(LOGIN_WINDOW_POLL_SECONDS)
             if job.stop_event.is_set():
                 self._update_job(job, "stopped", "人工登录任务已安全停止。")
             else:
-                current_url = str(operator.page.url)
+                current_url = str(page.url)
                 parsed = urlparse(current_url)
                 hostname = (parsed.hostname or "").casefold()
                 if (
@@ -1115,18 +1177,102 @@ class FigureExecutionService:
                     raise UiServiceError(
                         "LOGIN_REQUIRED",
                         "尚未确认 BioRender 登录状态，请完成登录后再检查。",
+                        diagnostic_hint="请在打开的 Chromium 中完成登录后再次检查。",
                     )
                 self._login_verified = True
                 self._update_job(job, "completed", "登录状态已确认，浏览器任务已释放。")
         except Exception as error:
+            error_code, message, diagnostic_hint = self._manual_login_error(error)
+            logger.exception(
+                "Manual login job %s failed with %s",
+                job.id,
+                error_code,
+            )
             self._update_job(
                 job,
                 "failed",
-                "无法打开人工登录窗口。",
-                error_code=type(error).__name__,
+                message,
+                error_code=error_code,
+                diagnostic_hint=diagnostic_hint,
             )
         finally:
-            operator.close()
+            if operator is not None:
+                try:
+                    operator.close()
+                except Exception:
+                    logger.exception("Failed to close manual login operator for %s", job.id)
+
+    def _wait_for_manual_login_startup(self, job: ManagedJob) -> None:
+        deadline = monotonic() + LOGIN_STARTUP_WAIT_SECONDS
+        while True:
+            with self._lock:
+                if job.status == "waiting_user" or job.status in FINAL_JOB_STATES:
+                    return
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    return
+                job.state_event.clear()
+            job.state_event.wait(min(remaining, LOGIN_WINDOW_POLL_SECONDS))
+
+    @staticmethod
+    def _manual_login_error(error: Exception) -> tuple[str, str, str]:
+        if isinstance(error, UiServiceError):
+            return (
+                error.error_code,
+                str(error),
+                error.diagnostic_hint or "请查看后端异常日志后重试。",
+            )
+
+        raw_message = str(error)
+        normalized = raw_message.casefold()
+        if any(
+            marker in normalized
+            for marker in (
+                "target page, context or browser has been closed",
+                "target closed",
+                "browser has been closed",
+                "browser disconnected",
+            )
+        ):
+            return (
+                "LOGIN_WINDOW_CLOSED",
+                "人工登录窗口已被关闭，浏览器任务已释放。",
+                "可以重新点击“打开 BioRender 登录页面”。",
+            )
+        if isinstance(error, ImportError) or "optional browser dependencies" in normalized:
+            return (
+                "PLAYWRIGHT_NOT_INSTALLED",
+                "启动 Web UI 的 Python 环境未安装 Playwright。",
+                "请在启动 Web UI 的同一 Python 环境安装项目 browser 依赖。",
+            )
+        if "executable doesn't exist" in normalized or (
+            "playwright install" in normalized and "chromium" in normalized
+        ):
+            return (
+                "CHROMIUM_NOT_INSTALLED",
+                "Chromium 未安装，无法打开人工登录窗口。",
+                "请在启动 Web UI 的同一 Python 环境运行："
+                "python -m playwright install chromium",
+            )
+        if any(
+            marker in normalized
+            for marker in (
+                "processsingleton",
+                "profile in use",
+                "user data directory is already in use",
+                "cannot create a process singleton",
+            )
+        ):
+            return (
+                "BROWSER_PROFILE_IN_USE",
+                "浏览器 Profile 被其他项目进程占用。",
+                "请安全停止本项目旧登录任务，关闭其 Playwright 窗口后重试。",
+            )
+        return (
+            "PLAYWRIGHT_LAUNCH_FAILED",
+            "Playwright 无法启动人工登录 Chromium。",
+            "请确认 Web UI 运行于可创建桌面窗口的用户会话，并查看后端异常日志。",
+        )
 
     def _start_thread(
         self,
@@ -1151,15 +1297,18 @@ class FigureExecutionService:
         message: str,
         *,
         error_code: str | None = None,
+        diagnostic_hint: str | None = None,
         result: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             job.status = status
             job.message = message
             job.error_code = error_code
+            job.diagnostic_hint = diagnostic_hint
             job.updated_at = datetime.now(UTC).isoformat()
             if result is not None:
                 job.result = result
+            job.state_event.set()
 
     def _run_job_target(
         self,
@@ -1181,13 +1330,16 @@ class FigureExecutionService:
                             else "后台任务异常退出，已释放浏览器任务锁。"
                         ),
                         error_code=type(error).__name__,
+                        diagnostic_hint="请查看后端异常日志后重试。",
                     )
 
     def _request_job_stop_locked(self, job: ManagedJob) -> dict[str, Any]:
         job.stop_event.set()
         job.status = "stop_requested"
         job.message = "已请求安全停止，将在当前 GUI 动作结束后暂停。"
+        job.diagnostic_hint = None
         job.updated_at = datetime.now(UTC).isoformat()
+        job.state_event.set()
         if job.kind == "manual_login":
             self._login_complete.set()
         return job.public()
@@ -1206,7 +1358,11 @@ class FigureExecutionService:
                 else "检测到后台任务已退出，浏览器任务锁已自动释放。"
             )
             job.error_code = None if job.stop_event.is_set() else "STALE_JOB_RECOVERED"
+            job.diagnostic_hint = (
+                None if job.stop_event.is_set() else "可以重新启动该任务。"
+            )
             job.updated_at = datetime.now(UTC).isoformat()
+            job.state_event.set()
             if job.figure_id:
                 record = self.database.get_figure(job.figure_id)
                 if record and record["status"] in INTERRUPTED_FIGURE_STATES:
@@ -1233,9 +1389,16 @@ class FigureExecutionService:
                 None,
             )
             if active is not None:
+                if active.kind == "manual_login":
+                    raise UiServiceError(
+                        "LOGIN_JOB_ALREADY_ACTIVE",
+                        "已有人工登录任务正在运行。",
+                        diagnostic_hint="请使用现有登录窗口，或先安全停止后再重试。",
+                    )
                 raise UiServiceError(
                     "BROWSER_BUSY",
                     "浏览器正在执行其他任务，请等待或安全停止后再试。",
+                    diagnostic_hint=f"当前任务：{active.kind}（{active.id}）。",
                 )
 
     def _active_job_for_figure(self, figure_id: str) -> ManagedJob | None:

@@ -196,6 +196,8 @@ class UiLiveRunRequest(SafeEditorUrlMixin):
     model_config = ConfigDict(extra="forbid")
 
     task: UiTaskInput
+    plan_id: str | None = Field(default=None, pattern=r"^figure_[a-zA-Z0-9_-]+$")
+    # Kept for old clients and persisted runs; the Wizard no longer sends it.
     dry_run_id: str | None = Field(default=None, pattern=r"^figure_[a-zA-Z0-9_-]+$")
     confirmed_disposable: bool
     confirm_live: bool
@@ -219,4 +221,5 @@ class UiLoginRequest(BaseModel):
 class UiError(BaseModel):
     error_code: str
     message: str
+    diagnostic_hint: str | None = None
     details: dict[str, object] | list[object] | None = None
