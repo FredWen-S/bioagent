@@ -24,8 +24,11 @@ PowerShell 或 JSON 的食品科学、生物学与其他科研用户。用户在
 
 ## 3. 启动
 
-先按照 [Environment_Setup.md](Environment_Setup.md) 安装 Python、项目依赖、Playwright 和
-Chromium。然后在 PowerShell 中运行：
+Windows 10/11 用户先按照 [Windows_Installation_Guide.md](Windows_Installation_Guide.md)
+双击 `Install-BioAgent.cmd`，完成后双击 `Start-BioAgent.cmd`。启动脚本会验证 `.venv`、
+核心依赖和端口，并只在 `127.0.0.1` 上启动服务。
+
+也可以在 PowerShell 中运行：
 
 ```powershell
 cd C:\bioagent
@@ -47,7 +50,7 @@ cd C:\bioagent
 ```
 
 服务只监听本机回环地址 `127.0.0.1`，不会自动公开到局域网或互联网。按 `Ctrl+C` 停止。
-启动脚本不会安装依赖，也不会修改系统环境。
+启动脚本不会安装依赖、提升管理员权限或修改系统环境；缺少环境时会提示先运行安装器。
 
 ## 4. 页面结构
 

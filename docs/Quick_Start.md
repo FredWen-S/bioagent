@@ -8,6 +8,16 @@ Create with AI、AI Edit，也不消耗 AI credits**。
 
 ## 1. 安装
 
+Windows 10/11 最简单的方式是在项目根目录双击：
+
+```text
+Install-BioAgent.cmd
+```
+
+它会检查 Python 3.11/3.12、创建 `.venv`、安装 `.[browser]`、只安装 Playwright Chromium、
+初始化目录与 SQLite，并执行本地快速自检。它不会访问 BioRender。完整说明见
+[Windows_Installation_Guide.md](Windows_Installation_Guide.md)。开发者手动安装方式如下：
+
 ```powershell
 cd C:\bioagent
 python -m venv .venv
@@ -18,8 +28,10 @@ playwright install chromium
 
 ## 2. 启动图形化界面
 
+Windows 用户可以直接双击 `Start-BioAgent.cmd`。也可以运行：
+
 ```powershell
-python -m app.cli web-ui
+.\.venv\Scripts\python.exe -m app.cli web-ui
 ```
 
 浏览器打开：
