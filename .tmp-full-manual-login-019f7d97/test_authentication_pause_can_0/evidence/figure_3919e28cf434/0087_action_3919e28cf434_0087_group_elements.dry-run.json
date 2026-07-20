@@ -1,0 +1,24 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_3919e28cf434_0087_group_elements",
+    "figure_id": "figure_3919e28cf434",
+    "sequence": 87,
+    "action": "group_elements",
+    "arguments": {
+      "element_ids": [
+        "t_cell_after",
+        "label_t_cell_after"
+      ],
+      "group_id": "group_t_cell_after",
+      "logical_group_id": "group_t_cell_after"
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": null
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

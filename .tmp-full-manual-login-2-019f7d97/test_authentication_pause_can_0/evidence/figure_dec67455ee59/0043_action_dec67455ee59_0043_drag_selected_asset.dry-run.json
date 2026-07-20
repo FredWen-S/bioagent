@@ -1,0 +1,29 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_dec67455ee59_0043_drag_selected_asset",
+    "figure_id": "figure_dec67455ee59",
+    "sequence": 43,
+    "action": "drag_selected_asset",
+    "arguments": {
+      "entity_id": "tumor_cell_after",
+      "logical_element_id": "tumor_cell_after",
+      "target_x": 0.875,
+      "target_y": 0.3133,
+      "target_width": 0.11900000000000001
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.8155,
+      "y": 0.2538,
+      "width": 0.11900000000000001,
+      "height": 0.11900000000000001,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

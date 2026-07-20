@@ -1,0 +1,25 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_1f058c96dc29_0075_align_elements",
+    "figure_id": "figure_1f058c96dc29",
+    "sequence": 75,
+    "action": "align_elements",
+    "arguments": {
+      "element_ids": [
+        "t_cell_after",
+        "tumor_cell_after"
+      ],
+      "logical_layout_id": "align_anti_pd1_treatment_0075",
+      "alignment": "middle",
+      "region_id": "anti_pd1_treatment"
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": null
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

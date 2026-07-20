@@ -1,0 +1,35 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_3919e28cf434_0081_connect_elements",
+    "figure_id": "figure_3919e28cf434",
+    "sequence": 81,
+    "action": "connect_elements",
+    "arguments": {
+      "relation_id": "pd1_pdl1_blocked_after",
+      "logical_connector_id": "pd1_pdl1_blocked_after",
+      "source_entity_id": "pd1_after",
+      "target_entity_id": "pdl1_after",
+      "connector_type": "t_bar",
+      "semantic_role": "blocking",
+      "direction": "source_to_target",
+      "start_anchor": "center",
+      "end_anchor": "center",
+      "expected_route": "straight",
+      "label": "Interaction blocked"
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": {
+      "x": 0.535,
+      "y": 0.42500000000000004,
+      "width": 0.41,
+      "height": 0.19,
+      "coordinate_space": "normalized_canvas"
+    }
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

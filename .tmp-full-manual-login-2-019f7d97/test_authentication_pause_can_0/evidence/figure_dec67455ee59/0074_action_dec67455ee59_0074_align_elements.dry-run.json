@@ -1,0 +1,25 @@
+{
+  "mode": "dry-run",
+  "action": {
+    "id": "action_dec67455ee59_0074_align_elements",
+    "figure_id": "figure_dec67455ee59",
+    "sequence": 74,
+    "action": "align_elements",
+    "arguments": {
+      "element_ids": [
+        "pd1_before",
+        "pdl1_before"
+      ],
+      "logical_layout_id": "align_without_treatment_0074",
+      "alignment": "middle",
+      "region_id": "without_treatment"
+    },
+    "timeout_seconds": 20.0,
+    "max_retries": 2,
+    "requires_screenshot": true,
+    "risk_level": "low",
+    "requires_approval": false,
+    "expected_bbox": null
+  },
+  "note": "No browser, account, BioRender AI, export, or paid action was used."
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "calibration_ebd202b55d37",
+  "ui_profile_version": "ui-51fb3d824e82",
+  "created_at": "2026-07-20T08:07:50.501382+00:00",
+  "url": "https://app.biorender.com/editor/fixture",
+  "viewport": {
+    "x": 0.0,
+    "y": 0.0,
+    "width": 1440.0,
+    "height": 1000.0,
+    "coordinate_space": "viewport_pixels"
+  },
+  "editor_loaded": false,
+  "status": "invalid",
+  "search_input": {
+    "name": "search_input",
+    "found": false,
+    "bbox": null,
+    "locator": null,
+    "diagnostics": [
+      "search_input not found"
+    ]
+  },
+  "search_results_region": {
+    "name": "search_results_region",
+    "found": true,
+    "bbox": {
+      "x": 0.0,
+      "y": 0.0,
+      "width": 300.0,
+      "height": 800.0,
+      "coordinate_space": "viewport_pixels"
+    },
+    "locator": {
+      "strategy": "css",
+      "query": "[data-testid*='search-results']",
+      "confidence": 0.96
+    },
+    "diagnostics": []
+  },
+  "canvas": {
+    "name": "canvas",
+    "found": true,
+    "bbox": {
+      "x": 320.0,
+      "y": 80.0,
+      "width": 1000.0,
+      "height": 700.0,
+      "coordinate_space": "viewport_pixels"
+    },
+    "locator": {
+      "strategy": "css",
+      "query": "[data-testid*='canvas-container']",
+      "confidence": 0.97
+    },
+    "diagnostics": []
+  },
+  "visible_modals": [],
+  "ai_controls": [],
+  "screenshot_path": "C:\\bioagent\\.tmp-full-manual-login-019f7d97\\test_calibration_missing_searc0\\20260720\\calibration_ebd202b55d37\\calibration.png",
+  "diagnostics": [
+    "required search input was not found"
+  ]
+}
