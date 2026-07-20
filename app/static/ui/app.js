@@ -47,6 +47,8 @@ const state = {
   canvasVerified: false,
   planId: null,
   planFingerprint: null,
+  dryRunId: null,
+  dryRunFingerprint: null,
   runId: null,
   currentJobId: null,
   currentJobStatus: null,
@@ -109,6 +111,8 @@ function saveState() {
     canvasVerified: state.canvasVerified,
     planId: state.planId,
     planFingerprint: state.planFingerprint,
+    dryRunId: state.dryRunId,
+    dryRunFingerprint: state.dryRunFingerprint,
     runId: state.runId,
     currentJobId: state.currentJobId
   }));
@@ -226,6 +230,11 @@ function invalidatePlan() {
   state.planId = null;
   state.planFingerprint = null;
   state.planSummary = null;
+  // The plan changed, so any previously confirmed dry_run no longer applies
+  // to what will run next. Drop it to prevent DRY_RUN_TASK_MISMATCH after
+  // the user tweaks the prompt.
+  state.dryRunId = null;
+  state.dryRunFingerprint = null;
   byId("plan-summary").hidden = true;
   setText("prompt-guidance", "请先解析绘图需求。");
   renderPromptPhases({ state: "prompt_required" });
@@ -587,7 +596,7 @@ async function parsePrompt() {
 }
 
 function livePayload() {
-  return {
+  const payload = {
     editor_url: state.canvasUrl.trim(),
     task: buildTask(),
     plan_id: state.planId,
@@ -595,6 +604,15 @@ function livePayload() {
     confirm_live: true,
     enable_biorender_ai: false
   };
+  // Only forward dry_run_id when it belongs to the *current* parsed task —
+  // an old localStorage value would otherwise attach the live run to a stale
+  // dry run and silently trip DRY_RUN_TASK_MISMATCH on the backend.
+  if (state.dryRunId && state.dryRunFingerprint
+      && state.planFingerprint
+      && state.dryRunFingerprint === state.planFingerprint) {
+    payload.dry_run_id = state.dryRunId;
+  }
+  return payload;
 }
 
 async function startLive() {
@@ -653,6 +671,8 @@ async function newTask() {
   state.canvasVerified = false;
   state.planId = null;
   state.planFingerprint = null;
+  state.dryRunId = null;
+  state.dryRunFingerprint = null;
   state.runId = null;
   state.currentJobId = null;
   state.summary = null;

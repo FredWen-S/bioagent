@@ -40,6 +40,7 @@ from app.operator.errors import (
     AuthenticationRequired,
     CandidateIdentityUnclear,
     DragDropFailed,
+    EditorPrepareFailed,
     OperatorError,
     PolicyBlocked,
     SearchNoResult,
@@ -506,17 +507,63 @@ class LivePlaywrightOperator:
 
     def _open_editor(self, action: GuiAction) -> LiveActionEvidence:
         page = self._page
-        page.goto(action.arguments["url"], wait_until="domcontentloaded", timeout=60_000)
+        requested_url = str(action.arguments["url"])
+        try:
+            page.goto(requested_url, wait_until="domcontentloaded", timeout=60_000)
+        except Exception as error:  # narrow-typed re-raises below
+            message = str(error) or type(error).__name__
+            normalized = message.casefold()
+            observed_url = self._safe_page_url()
+            if any(
+                marker in normalized
+                for marker in (
+                    "target closed",
+                    "target page, context or browser has been closed",
+                    "browser has been closed",
+                    "browser disconnected",
+                )
+            ):
+                raise EditorPrepareFailed(
+                    f"Browser page was closed before the editor could load: {message}",
+                    subcode="page_closed",
+                    requested_url=requested_url,
+                    observed_url=observed_url,
+                ) from error
+            if "timeout" in normalized:
+                raise EditorPrepareFailed(
+                    f"Navigation to BioRender editor timed out after 60s: {message}",
+                    subcode="navigation_timeout",
+                    requested_url=requested_url,
+                    observed_url=observed_url,
+                ) from error
+            raise EditorPrepareFailed(
+                f"Playwright refused the goto to the BioRender editor: {message}",
+                subcode="navigation_error",
+                requested_url=requested_url,
+                observed_url=observed_url,
+            ) from error
         page.wait_for_timeout(1500)
+        observed_url = self._safe_page_url()
         if self._authentication_visible():
             raise AuthenticationRequired(
                 "BioRender requires manual login. Run browser-login, authenticate in the "
                 "visible window, then resume. The agent never enters credentials."
             )
+        if not self._is_biorender_url(observed_url):
+            raise EditorPrepareFailed(
+                "The requested URL redirected off the BioRender domain; the editor "
+                f"never opened. Observed: {observed_url or '<unknown>'}",
+                subcode="redirected_off_domain",
+                requested_url=requested_url,
+                observed_url=observed_url,
+            )
         if self._canvas_locator() is None:
-            raise UiLayoutChanged(
+            raise EditorPrepareFailed(
                 "No BioRender canvas was detected. Open a disposable blank Figure manually "
-                "and pass its complete editor URL."
+                "and pass its complete editor URL.",
+                subcode="canvas_not_found",
+                requested_url=requested_url,
+                observed_url=observed_url,
             )
         profile, profile_path = BioRenderUiCalibrator(
             page,
@@ -2676,6 +2723,24 @@ class LivePlaywrightOperator:
             re.search(r"(?:login|log-in|sign-in|signin)", page.url, re.IGNORECASE)
             or page.locator("input[type='password']").count() > 0
         )
+
+    def _safe_page_url(self) -> str | None:
+        try:
+            return str(self._page.url) if self._page is not None else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_biorender_url(url: str | None) -> bool:
+        if not url:
+            return False
+        try:
+            from urllib.parse import urlparse
+
+            host = (urlparse(url).hostname or "").casefold()
+        except Exception:
+            return False
+        return host == "biorender.com" or host.endswith(".biorender.com")
 
     def _visible_control(self, pattern: str) -> bool:
         try:

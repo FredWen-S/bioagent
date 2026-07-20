@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.api.main import handle_ui_service_error
 from app.api.ui_routes import create_ui_router
 from app.schemas.figure_spec import FigureStatus
+from app.schemas.gui_action import ActionStatus
 from app.schemas.ui import UiTaskInput
 from app.services.figure_execution_service import (
     FigureExecutionService,
@@ -760,3 +761,192 @@ def test_starting_new_workflow_does_not_reuse_old_run(
     assert workflow["state"] == "canvas_required"
     assert workflow["step"] == 2
     assert str(old["run_id"]) not in str(workflow)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the "prepare failed but can_resume=true" incident
+# (Run figure_8875196268ee style). These make sure that:
+#   * A failure inside open_biorender_editor is NOT surfaced as safely
+#     resumable — Resume without fixing the environment would just re-fail.
+#   * A Live Run created from a confirmed Dry Run keeps the linkage
+#     (source_dry_run_id, task_fingerprint, dry_run_gate) so the UI cannot
+#     silently drift into "task_fingerprint=null".
+# ---------------------------------------------------------------------------
+
+
+def _mark_prepare_failed(
+    service: FigureExecutionService,
+    figure_id: str,
+    *,
+    subcode: str = "redirected_off_domain",
+    requested_url: str = "https://app.biorender.com/figure/disposable",
+    observed_url: str = "https://www.biorender.com/marketing",
+) -> str:
+    """Persist a realistic open_biorender_editor failure straight into the DB."""
+    from app.schemas.gui_action import GuiActionResult
+
+    actions = service.database.list_actions(figure_id)
+    prepare = next(action for action in actions if action.action.value == "open_biorender_editor")
+    result = GuiActionResult(
+        action_id=prepare.id,
+        status=ActionStatus.FAILED,
+        attempt=1,
+        error_type="editor_prepare_failed",
+        message="canvas never appeared",
+        screenshot_path=None,
+        expected_bbox=None,
+        metadata={
+            "mode": "live",
+            "evidence_kind": "failure",
+            "safe_to_retry": False,
+            "editor_prepare_failure": {
+                "error_type": "editor_prepare_failed",
+                "subcode": subcode,
+                "requested_url": requested_url,
+                "observed_url": observed_url,
+                "screenshot_path": None,
+            },
+        },
+    )
+    service.database.record_action_result(figure_id, result)
+    service.database.set_status(figure_id, FigureStatus.FAILED)
+    return prepare.id
+
+
+def test_prepare_failure_is_not_marked_safe_to_resume(
+    ui_service: FigureExecutionService,
+) -> None:
+    from app.schemas.gui_action import ActionStatus  # noqa: F401  (imported for clarity)
+
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    _mark_prepare_failed(ui_service, str(plan["run_id"]))
+
+    summary = ui_service.run_summary(str(plan["run_id"]))
+    assert summary["status"] == "failed"
+    assert summary["current_action"]["action_type"] == "open_biorender_editor"
+    assert summary["can_resume"] is False, (
+        "prepare-phase failure must NOT be offered as a safe Resume"
+    )
+    assert summary["resume_blocked_reason"]
+    assert "Resume" in summary["resume_blocked_reason"] or "重新开始" in summary["resume_blocked_reason"]
+    prepare = summary["prepare_failure"]
+    assert prepare is not None
+    assert prepare["subcode"] == "redirected_off_domain"
+    assert prepare["requested_url"].endswith("/figure/disposable")
+    assert prepare["observed_url"] == "https://www.biorender.com/marketing"
+    assert prepare["error_type"] == "editor_prepare_failed"
+
+
+def test_paused_failures_remain_resumable(
+    ui_service: FigureExecutionService,
+) -> None:
+    """Regression guard: tightening can_resume must not break legit pauses."""
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    for paused_state in (
+        FigureStatus.PAUSED_AUTHENTICATION,
+        FigureStatus.PAUSED_APPROVAL,
+        FigureStatus.PAUSED_RECONCILIATION,
+    ):
+        ui_service.database.set_status(str(plan["run_id"]), paused_state)
+        summary = ui_service.run_summary(str(plan["run_id"]))
+        assert summary["can_resume"] is True, paused_state
+        assert summary["resume_blocked_reason"] is None, paused_state
+
+
+def test_live_run_from_confirmed_dry_run_exposes_linkage(
+    client: TestClient,
+    ui_service: FigureExecutionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Live Run must expose the source Dry Run and its fingerprint.
+
+    Previously ``run_summary`` looked up dry-run events on the *live* figure
+    id — which never has any — so the UI always saw
+    dry_run_completed=false / task_fingerprint=null even when the backend
+    had a fully confirmed dry run behind the run.
+    """
+    dry_run = _dry_run(client)
+    confirmation = client.post(
+        f"/api/ui/runs/{dry_run['run_id']}/confirm-dry-run",
+        json={},
+    )
+    assert confirmation.status_code == 200
+    dry_run_fingerprint = confirmation.json()["task_fingerprint"]
+    assert dry_run_fingerprint
+
+    started: list[str] = []
+
+    def record_start(figure_id: str) -> dict[str, object]:
+        started.append(figure_id)
+        return {
+            "id": "job_test",
+            "kind": "live_figure",
+            "status": "queued",
+            "message": "queued",
+            "figure_id": figure_id,
+        }
+
+    monkeypatch.setattr(ui_service, "start_resume", record_start)
+    live = client.post(
+        "/api/ui/live-runs",
+        json={
+            "editor_url": "https://app.biorender.com/figure/disposable",
+            "task": _preset_task(),
+            "dry_run_id": dry_run["run_id"],
+            "confirmed_disposable": True,
+            "confirm_live": True,
+            "enable_biorender_ai": False,
+        },
+    )
+    assert live.status_code == 202
+    live_figure_id = started[0]
+
+    summary = ui_service.run_summary(live_figure_id)
+    assert summary["source_dry_run_id"] == dry_run["run_id"]
+    assert summary["dry_run_gate"] == "confirmed_dry_run"
+    assert summary["dry_run_confirmed"] is True
+    assert summary["dry_run_completed"] is True
+    assert summary["task_fingerprint"] == dry_run_fingerprint
+
+
+def test_live_run_from_plan_only_exposes_gate(
+    ui_service: FigureExecutionService,
+) -> None:
+    """A Live Run started from a plan alone must expose ``dry_run_gate=plan_only``.
+
+    That is the intentional bypass (the wizard permits it), but silence about
+    the bypass is what let the incident escape review. Surface it so the UI
+    and audit can tell the two paths apart.
+    """
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    running = threading.Event()
+
+    def hold_live_job(job_id: str) -> None:
+        job = ui_service._jobs[job_id]
+        ui_service._update_job(job, "running", "test running")
+        running.set()
+        job.stop_event.wait(timeout=2)
+        ui_service._update_job(job, "stopped", "test stopped")
+
+    ui_service._run_live_job = hold_live_job  # type: ignore[method-assign]
+    job = ui_service.start_live(
+        task,
+        "https://app.biorender.com/figure/disposable",
+        plan_id=str(plan["run_id"]),
+        dry_run_id=None,
+    )
+    assert running.wait(timeout=1)
+    live_figure_id = str(job["figure_id"])
+    summary = ui_service.run_summary(live_figure_id)
+    assert summary["source_plan_id"] == str(plan["run_id"])
+    assert summary["source_dry_run_id"] is None
+    assert summary["dry_run_gate"] == "plan_only"
+    # Fingerprint still comes from the parsed plan so the UI cannot show
+    # task_fingerprint=null for a Live Run that started from a real plan.
+    assert summary["task_fingerprint"]
+
+    ui_service.request_job_stop(str(job["id"]))
+    ui_service._threads[str(job["id"])].join(timeout=2)

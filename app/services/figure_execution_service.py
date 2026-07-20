@@ -26,6 +26,7 @@ from app.schemas.figure_spec import (
     RelationType,
     Requirement,
 )
+from app.schemas.gui_action import ActionType
 from app.schemas.ui import CustomFigureInput, UiTaskInput
 from app.storage.database import FigureDatabase
 from app.workflow.engine import WorkflowEngine
@@ -652,6 +653,25 @@ class FigureExecutionService:
         status_counts = self._status_counts(requirements)
         action_counts = self._status_counts(actions)
         dry_run = self._dry_run_metadata(figure_id)
+        source = self._live_source_metadata(figure_id)
+        prepare_failure = self._prepare_failure_metadata(figure_id, actions)
+        current_action = self._current_action(figure_id, actions)
+        can_resume, resume_blocked_reason = self._resume_availability(
+            status,
+            current_action=current_action,
+            prepare_failure=prepare_failure,
+        )
+        # A live run inherits its dry-run gate from the source dry run, so the
+        # UI can display the real linkage instead of "task_fingerprint=null".
+        effective_dry_run_completed = dry_run["completed"] or bool(
+            source.get("dry_run_completed")
+        )
+        effective_dry_run_confirmed = dry_run["confirmed"] or bool(
+            source.get("dry_run_confirmed")
+        )
+        effective_task_fingerprint = (
+            dry_run["task_fingerprint"] or source.get("task_fingerprint")
+        )
         return {
             "run_id": figure_id,
             "title": record["title"],
@@ -667,30 +687,29 @@ class FigureExecutionService:
             "progress_percent": self._progress_percent(actions),
             "steps": self._progress_steps(actions, status),
             "save_status": self._save_status(figure_id),
-            "can_resume": status
-            in {
-                FigureStatus.PAUSED_AUTHENTICATION.value,
-                FigureStatus.PAUSED_APPROVAL.value,
-                FigureStatus.PAUSED_RECONCILIATION.value,
-                FigureStatus.FAILED.value,
-            },
+            "can_resume": can_resume,
+            "resume_blocked_reason": resume_blocked_reason,
             "can_stop": self._active_job_for_figure(figure_id) is not None,
             "run_mode": "dry_run" if dry_run["completed"] else "live_or_plan",
-            "dry_run_completed": dry_run["completed"],
-            "dry_run_confirmed": dry_run["confirmed"],
+            "dry_run_completed": effective_dry_run_completed,
+            "dry_run_confirmed": effective_dry_run_confirmed,
             "can_confirm_dry_run": (
                 dry_run["completed"]
                 and not dry_run["confirmed"]
                 and status == FigureStatus.AWAITING_CONFIRMATION.value
             ),
             "real_biorender_accepted": False,
-            "task_fingerprint": dry_run["task_fingerprint"],
+            "task_fingerprint": effective_task_fingerprint,
+            "source_dry_run_id": source.get("dry_run_id"),
+            "source_plan_id": source.get("plan_id"),
+            "dry_run_gate": source.get("gate"),
+            "prepare_failure": prepare_failure,
             "completed_at": (
                 record["updated_at"]
                 if status in {"completed", "awaiting_confirmation", "failed", "blocked"}
                 else None
             ),
-            "current_action": self._current_action(figure_id, actions),
+            "current_action": current_action,
             "completed_actions": sum(
                 item["status"] in {"verified", "succeeded"} for item in actions
             ),
@@ -703,6 +722,157 @@ class FigureExecutionService:
                 for item in actions[-5:]
             ],
         }
+
+    # ------------------------------------------------------------------ helpers
+
+    def _live_source_metadata(self, figure_id: str) -> dict[str, Any]:
+        """Return the dry-run / plan lineage recorded when this Live Run started.
+
+        A live run is a fresh figure, so its own ``figure_id`` has no
+        ``dry_run_completed`` audit event. The linkage lives on a
+        ``live_started_from_confirmed_dry_run`` (or ``live_started_from_plan``)
+        event pointing to the source dry-run / plan figure. Surface that
+        linkage — otherwise the UI shows an unrelated, always-false gate.
+        """
+        gate: str | None = None
+        source_dry_run_id: str | None = None
+        source_plan_id: str | None = None
+        for event in self.database.list_audit_events(figure_id=figure_id):
+            if event["event_type"] == "live_started_from_confirmed_dry_run":
+                gate = "confirmed_dry_run"
+                payload = event.get("payload") or {}
+                source_dry_run_id = payload.get("dry_run_id") or source_dry_run_id
+                source_plan_id = payload.get("plan_id") or source_plan_id
+            elif event["event_type"] == "live_started_from_plan":
+                gate = gate or "plan_only"
+                payload = event.get("payload") or {}
+                source_plan_id = payload.get("plan_id") or source_plan_id
+        source_meta: dict[str, Any] = {
+            "gate": gate,
+            "dry_run_id": source_dry_run_id,
+            "plan_id": source_plan_id,
+            "dry_run_completed": False,
+            "dry_run_confirmed": False,
+            "task_fingerprint": None,
+        }
+        if source_dry_run_id:
+            dry = self._dry_run_metadata(source_dry_run_id)
+            source_meta["dry_run_completed"] = dry["completed"]
+            source_meta["dry_run_confirmed"] = dry["confirmed"]
+            source_meta["task_fingerprint"] = dry["task_fingerprint"]
+        elif source_plan_id:
+            plan = self._plan_metadata(source_plan_id)
+            source_meta["task_fingerprint"] = plan.get("task_fingerprint")
+        return source_meta
+
+    @staticmethod
+    def _prepare_failure_metadata(
+        figure_id: str,
+        actions: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Extract the structured prepare-phase failure from action metadata.
+
+        The Playwright operator raises ``EditorPrepareFailed`` with a
+        ``subcode`` and captured URLs when ``open_biorender_editor`` cannot
+        reach the editor (redirect, timeout, canvas missing, browser closed).
+        The workflow engine stashes that payload into the action result's
+        ``metadata.editor_prepare_failure``; surface it here so callers do not
+        have to walk audit events to reason about the failure.
+        """
+        del figure_id  # kept for future audit-event fallback
+        prepare_action = next(
+            (
+                item
+                for item in actions
+                if item.get("action_type") == "open_biorender_editor"
+            ),
+            None,
+        )
+        if prepare_action is None:
+            return None
+        if prepare_action.get("status") != "failed":
+            return None
+        result = prepare_action.get("result") or {}
+        metadata = result.get("metadata") if isinstance(result, dict) else None
+        if not isinstance(metadata, dict):
+            metadata = {}
+        payload = metadata.get("editor_prepare_failure")
+        if isinstance(payload, dict):
+            return {
+                "action_id": prepare_action.get("id"),
+                "error_type": result.get("error_type"),
+                "message": result.get("message"),
+                "subcode": payload.get("subcode"),
+                "requested_url": payload.get("requested_url"),
+                "observed_url": payload.get("observed_url"),
+                "screenshot_path": payload.get("screenshot_path"),
+                "attempt": prepare_action.get("attempts"),
+            }
+        # Fallback: prepare failed but no structured payload was captured.
+        return {
+            "action_id": prepare_action.get("id"),
+            "error_type": result.get("error_type") or "operator_error",
+            "message": result.get("message"),
+            "subcode": None,
+            "requested_url": None,
+            "observed_url": None,
+            "screenshot_path": result.get("screenshot_path"),
+            "attempt": prepare_action.get("attempts"),
+        }
+
+    @staticmethod
+    def _resume_availability(
+        status: str,
+        *,
+        current_action: dict[str, Any] | None,
+        prepare_failure: dict[str, Any] | None,
+    ) -> tuple[bool, str | None]:
+        """Decide whether the Resume button is safe to offer.
+
+        The previous rule marked every ``FAILED`` run resumable, which meant a
+        prepare-phase failure — where the browser never reached the editor —
+        would silently invite the user to press Resume and immediately
+        re-fail. Now a Resume is only offered when a step-boundary pause
+        happened, or when a Live Run failed *after* the editor was already
+        prepared (so the environment is at least reachable).
+        """
+        paused_states = {
+            FigureStatus.PAUSED_AUTHENTICATION.value,
+            FigureStatus.PAUSED_APPROVAL.value,
+            FigureStatus.PAUSED_RECONCILIATION.value,
+        }
+        if status in paused_states:
+            return True, None
+        if status != FigureStatus.FAILED.value:
+            return False, None
+        if prepare_failure is not None:
+            subcode = prepare_failure.get("subcode")
+            reason_by_subcode = {
+                "navigation_timeout": "打开 BioRender 编辑器超时，请检查网络与 URL 后重新开始任务，而不是继续。",
+                "navigation_error": "Playwright 无法打开该 Figure URL，请检查后重新开始任务。",
+                "redirected_off_domain": "该 URL 被跳转出 BioRender 官方域名，Resume 无法修复；请更换 Figure URL。",
+                "redirected_to_login": "浏览器会话失效，需要重新登录后再新开任务，而不是继续。",
+                "canvas_not_found": "未检测到画布，请确认 Figure URL 指向可编辑画布后重新开始。",
+                "page_closed": "浏览器窗口被关闭，请重新登录并新开任务。",
+                "browser_profile_locked": "浏览器 Profile 被占用，请关闭其他实例后重新开始。",
+                "browser_launch_failed": "Chromium 无法启动，请检查 Playwright 安装后重新开始。",
+            }
+            return (
+                False,
+                reason_by_subcode.get(
+                    str(subcode) if subcode is not None else "",
+                    "准备阶段失败，Resume 无法修复浏览器环境；请修正后重新开始任务。",
+                ),
+            )
+        current_type = (
+            (current_action or {}).get("action_type") if current_action else None
+        )
+        if current_type == ActionType.OPEN_EDITOR.value:
+            return (
+                False,
+                "准备阶段失败，Resume 无法修复浏览器环境；请修正后重新开始任务。",
+            )
+        return True, None
 
     def element_summary(self, figure_id: str) -> list[dict[str, Any]]:
         if self.database.get_figure(figure_id) is None:
