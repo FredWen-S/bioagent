@@ -18,6 +18,7 @@ runtime/full-pytest-temp-ui/
 runtime/nonbrowser-*/
 runtime/ui-*/
 output/playwright/*
+output/install/*
 !runtime/logs/.gitkeep
 !runtime/screenshots/.gitkeep
 !runtime/sessions/.gitkeep
