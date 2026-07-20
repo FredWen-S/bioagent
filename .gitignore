@@ -4,6 +4,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .playwright-cli/
+.tmp/
+.tmp-*/
 .venv/
 dist/
 build/
