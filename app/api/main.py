@@ -58,6 +58,15 @@ async def handle_ui_service_error(
         "RUN_NOT_ACTIVE",
         "BROWSER_BUSY",
         "LOGIN_WINDOW_NOT_OPEN",
+        "DRY_RUN_NOT_READY",
+        "DRY_RUN_CONFIRMATION_REQUIRED",
+        "DRY_RUN_TASK_MISMATCH",
+        "PLAN_REQUIRED",
+        "PLAN_TASK_MISMATCH",
+        "PLAN_NOT_EXECUTABLE",
+        "LOGIN_REQUIRED",
+        "BLANK_CANVAS_CONFIRMATION_REQUIRED",
+        "CANVAS_NOT_VERIFIED",
     }:
         status_code = 409
     elif error.error_code == "EVIDENCE_ACCESS_DENIED":

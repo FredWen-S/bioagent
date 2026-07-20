@@ -16,6 +16,7 @@ def test_ui_page_loads_with_required_safety_language() -> None:
     assert "BioRender 科研绘图助手" in response.text
     assert "BioRender AI：已禁用" in response.text
     assert "安全预演" in response.text
+    assert "确认预演结果" in response.text
     assert "真实执行" in response.text
     assert "真实 BioRender 线上验收尚未完成" in response.text
     assert response.headers["x-content-type-options"] == "nosniff"
@@ -29,6 +30,8 @@ def test_live_execution_is_disabled_in_initial_markup() -> None:
     assert 'id="start-live"' in html
     assert 'id="start-live" class="button button-danger" type="button" disabled' in html
     assert "我已确认使用可丢弃的空白 Figure" in html
+    assert 'id="confirm-dry-run"' in html
+    assert "必须先完成并确认安全预演结果" in html
 
 
 def test_unknown_state_is_not_mapped_to_success() -> None:
@@ -52,3 +55,22 @@ def test_ui_does_not_copy_operator_or_shell_out_to_cli() -> None:
     assert "WorkflowEngine" in service
     assert "FigureExecutionService" in cli
     assert "innerHTML" not in javascript
+    assert "dry_run_id" in javascript
+    assert "/confirm-dry-run" in javascript
+    assert "/jobs/${encodeURIComponent(state.currentJobId)}/stop" in javascript
+
+
+def test_wizard_has_five_steps_and_backend_driven_state_copy() -> None:
+    html = (PROJECT_ROOT / "app" / "static" / "ui" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    javascript = (PROJECT_ROOT / "app" / "static" / "ui" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert html.count("data-step-panel=") == 5
+    assert html.count("data-step-indicator=") == 5
+    assert "当前步骤" in html
+    assert "下一步：" in javascript
+    assert "/api/ui/workflow-state" in javascript
+    assert "localStorage" in javascript
+    assert "completed_with_unknown" in javascript
