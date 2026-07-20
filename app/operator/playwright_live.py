@@ -40,7 +40,6 @@ from app.operator.biorender.observer import (
 from app.operator.biorender.policy_guard import BioRenderPolicyGuard
 from app.operator.biorender.search import RuntimeCandidate, SafeAssetSearch
 from app.operator.errors import (
-    AuthenticationRequired,
     CandidateIdentityUnclear,
     DragDropFailed,
     EditorPrepareFailed,

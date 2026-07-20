@@ -23,7 +23,6 @@ from app.operator.playwright_live import (
 from app.schemas.gui_action import ActionType, GuiAction
 from tests.mocks.fake_playwright import FakeElement, FakePage
 
-
 CANVAS_SELECTOR = CANVAS_LOCATORS[0].query
 
 
