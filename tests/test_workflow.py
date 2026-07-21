@@ -60,12 +60,24 @@ def test_dry_run_is_persisted_and_requires_confirmation(tmp_path: Path) -> None:
     assert status == FigureStatus.AWAITING_CONFIRMATION
     states = database.action_states(bundle.figure_spec.id)
     assert len(states) == len(bundle.actions)
-    assert {state["status"] for state in states} == {"succeeded"}
+    assert {state["status"] for state in states} == {"simulated"}
     assert all(Path(state["result"]["screenshot_path"]).exists() for state in states)
     verifications = database.get_verifications(bundle.figure_spec.id)
     assert verifications[-1]["payload"]["visual_verification_performed"] is False
 
     assert engine.confirm(bundle.figure_spec.id) == FigureStatus.COMPLETED
+
+
+def test_search_actions_do_not_multiply_workflow_retries(tmp_path: Path) -> None:
+    database = FigureDatabase(tmp_path / "agent.db")
+    bundle = WorkflowEngine(database).plan(PD1_REQUEST)
+    search_actions = [
+        action for action in bundle.actions if action.action.value == "search_asset"
+    ]
+
+    assert search_actions
+    assert {action.max_retries for action in search_actions} == {0}
+    assert {action.timeout_seconds for action in search_actions} == {30.0}
 
 
 def test_authentication_pause_can_resume_from_first_unfinished_action(tmp_path: Path) -> None:
@@ -83,7 +95,7 @@ def test_authentication_pause_can_resume_from_first_unfinished_action(tmp_path: 
     )
     assert resumed == FigureStatus.AWAITING_CONFIRMATION
     assert {state["status"] for state in database.action_states(bundle.figure_spec.id)} == {
-        "succeeded"
+        "simulated"
     }
 
 

@@ -5,6 +5,8 @@ from fastapi.responses import FileResponse
 
 from app.schemas.ui import (
     UiCalibrationRequest,
+    UiCanvasCheckRequest,
+    UiDryRunConfirmRequest,
     UiDryRunRequest,
     UiEditorUrlRequest,
     UiLiveRunRequest,
@@ -29,6 +31,22 @@ def create_ui_router(service: FigureExecutionService) -> APIRouter:
     @router.get("/status")
     def ui_status() -> dict[str, object]:
         return service.system_status()
+
+    @router.get("/workflow-state")
+    def workflow_state(
+        plan_id: str | None = None,
+        dry_run_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, object]:
+        return service.workflow_state(
+            plan_id=plan_id,
+            dry_run_id=dry_run_id,
+            run_id=run_id,
+        )
+
+    @router.post("/workflow/reset")
+    def reset_workflow() -> dict[str, object]:
+        return service.reset_workflow()
 
     @router.get("/presets")
     def ui_presets() -> dict[str, object]:
@@ -58,21 +76,34 @@ def create_ui_router(service: FigureExecutionService) -> APIRouter:
             "redacted_url": service.redact_url(payload.editor_url),
         }
 
+    @router.post("/canvas/check", status_code=202)
+    def check_canvas(payload: UiCanvasCheckRequest) -> dict[str, object]:
+        return service.start_canvas_check(
+            payload.editor_url,
+            confirmed_blank=payload.confirmed_blank,
+        )
+
     @router.post("/plans")
     def inspect_plan(payload: UiPlanRequest) -> dict[str, object]:
-        bundle = service.plan_task(payload.task)
-        return {
-            **service.run_summary(bundle.figure_spec.id),
-            "scientific_validation_passed": bundle.scientific_validation.passed,
-            "validation_issues": [
-                item.model_dump(mode="json")
-                for item in bundle.scientific_validation.issues
-            ],
-        }
+        return service.inspect_plan(payload.task)
 
     @router.post("/dry-run")
     def start_dry_run(payload: UiDryRunRequest) -> dict[str, object]:
-        return service.plan_and_execute_dry_run(payload.task)
+        return service.execute_planned_dry_run(payload.plan_id, payload.task)
+
+    @router.post("/runs/{run_id}/confirm-dry-run")
+    def confirm_dry_run(
+        run_id: str,
+        payload: UiDryRunConfirmRequest | None = None,
+    ) -> dict[str, object]:
+        confirmation = payload or UiDryRunConfirmRequest()
+        return service.confirm_dry_run(
+            run_id,
+            task_fingerprint=confirmation.task_fingerprint,
+            plan_fingerprint=confirmation.plan_fingerprint,
+            source_plan_id=confirmation.source_plan_id,
+            editor_url=confirmation.editor_url,
+        )
 
     @router.post("/calibrate", status_code=202)
     def start_calibration(payload: UiCalibrationRequest) -> dict[str, object]:
@@ -95,11 +126,20 @@ def create_ui_router(service: FigureExecutionService) -> APIRouter:
     @router.post("/live-runs", status_code=202)
     def start_live_run(payload: UiLiveRunRequest) -> dict[str, object]:
         _require_live_confirmation(payload.confirmed_disposable, payload.confirm_live)
-        return service.start_live(payload.task, payload.editor_url)
+        return service.start_live(
+            payload.task,
+            payload.editor_url,
+            plan_id=payload.plan_id,
+            dry_run_id=payload.dry_run_id,
+        )
 
     @router.get("/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:
         return service.get_job(job_id)
+
+    @router.post("/jobs/{job_id}/stop", status_code=202)
+    def stop_job(job_id: str) -> dict[str, object]:
+        return service.request_job_stop(job_id)
 
     @router.get("/runs/{run_id}")
     def get_run(run_id: str) -> dict[str, object]:

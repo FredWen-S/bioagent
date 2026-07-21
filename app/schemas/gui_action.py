@@ -32,6 +32,7 @@ class ActionStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
+    SIMULATED = "simulated"
     FAILED = "failed"
     UNKNOWN = "unknown"
     BLOCKED_BY_POLICY = "blocked_by_policy"

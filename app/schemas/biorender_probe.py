@@ -40,6 +40,29 @@ class LocatorEvidence(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+class LocatorMatchDiagnostic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: str
+    query: str
+    count: int = Field(ge=0)
+    visible_count: int = Field(ge=0)
+    bbox_count: int = Field(ge=0)
+    matched: bool
+    error: str | None = None
+
+
+class UiAnchorDiagnostic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    required: bool = True
+    matched: bool
+    selected_locator: LocatorEvidence | None = None
+    candidates: list[LocatorMatchDiagnostic] = Field(default_factory=list)
+    message: str | None = None
+
+
 class CalibratedRegion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -77,6 +100,9 @@ class UiCalibrationProfile(BaseModel):
     ai_controls: list[CalibratedRegion] = Field(default_factory=list)
     screenshot_path: str
     diagnostics: list[str] = Field(default_factory=list)
+    missing_anchors: list[str] = Field(default_factory=list)
+    readiness_strategy: str = "domain+editor_chrome+asset_panel+canvas"
+    anchor_diagnostics: list[UiAnchorDiagnostic] = Field(default_factory=list)
 
 
 class AssetCandidateRecord(BaseModel):

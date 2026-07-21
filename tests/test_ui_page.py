@@ -22,12 +22,29 @@ def test_ui_page_loads_with_required_safety_language() -> None:
     assert "default-src 'self'" in response.headers["content-security-policy"]
 
 
+def test_ui_page_is_five_step_wizard_and_exposes_runtime_version() -> None:
+    client = TestClient(app)
+    page = client.get("/ui")
+    version = client.get("/api/version")
+
+    assert page.status_code == 200
+    assert page.text.count('data-step-panel="') == 5
+    assert "当前步骤 1 / 5" in page.text
+    assert "运行版本" in page.text
+    assert version.status_code == 200
+    assert set(("git_commit", "git_branch", "build_time", "static_files")) <= set(
+        version.json()
+    )
+
+
 def test_live_execution_is_disabled_in_initial_markup() -> None:
     html = (PROJECT_ROOT / "app" / "static" / "ui" / "index.html").read_text(
         encoding="utf-8"
     )
     assert 'id="start-live"' in html
     assert 'id="start-live" class="button button-danger" type="button" disabled' in html
+    assert 'id="run-dry-run"' in html
+    assert 'id="confirm-dry-run"' in html
     assert "我已确认使用可丢弃的空白 Figure" in html
 
 

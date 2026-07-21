@@ -16,9 +16,11 @@ from app.operator.biorender.calibration import BioRenderUiCalibrator
 from app.operator.biorender.drag import SafeAssetDrag
 from app.operator.biorender.locators import (
     ALIGN_TOOL_LOCATORS,
+    ASSET_PANEL_LOCATORS,
     CANVAS_LOCATORS,
     CONNECTOR_TOOL_LOCATORS,
     DISTRIBUTE_TOOL_LOCATORS,
+    EDITOR_CHROME_LOCATORS,
     GROUP_TOOL_LOCATORS,
     RESIZE_HANDLE_LOCATORS,
     ROTATE_HANDLE_LOCATORS,
@@ -45,6 +47,7 @@ from app.operator.errors import (
     EditorPrepareFailed,
     OperatorError,
     PolicyBlocked,
+    SearchActionFailed,
     SearchNoResult,
     UiLayoutChanged,
     UnsupportedLiveAction,
@@ -156,6 +159,8 @@ class LivePlaywrightOperator:
         self._profile_versions: dict[str, str] = {}
         self._current_figure_id: str | None = None
         self._attempt = 1
+        self._stop_requested: Any = lambda: False
+        self._search_rate_limit_until = 0.0
         if editor_ready_timeout_seconds <= 0:
             raise ValueError("editor_ready_timeout_seconds must be > 0")
         if editor_ready_poll_interval_seconds <= 0:
@@ -171,6 +176,9 @@ class LivePlaywrightOperator:
         # actually sleeping for the full 30-second production timeout.
         self._clock: Any = time.monotonic
         self._sleep: Any = time.sleep
+
+    def set_stop_requested(self, callback: Any) -> None:
+        self._stop_requested = callback or (lambda: False)
 
     @staticmethod
     def require_playwright() -> Any:
@@ -190,12 +198,20 @@ class LivePlaywrightOperator:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = sync_playwright().start()
-        self._context = self._playwright.chromium.launch_persistent_context(
-            str(self.profile_dir),
-            headless=not self.headed,
-            viewport={"width": 1440, "height": 1000},
-        )
-        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        try:
+            self._context = self._playwright.chromium.launch_persistent_context(
+                str(self.profile_dir),
+                headless=not self.headed,
+                viewport={"width": 1440, "height": 1000},
+            )
+            self._page = (
+                self._context.pages[0]
+                if self._context.pages
+                else self._context.new_page()
+            )
+        except BaseException:
+            self.close()
+            raise
 
     def execute(self, action: GuiAction, attempt: int = 1) -> GuiActionResult:
         self.policy.check(action)
@@ -600,6 +616,11 @@ class LivePlaywrightOperator:
             requested_url=requested_url,
             timeout_seconds=timeout_seconds,
         )
+        remaining_seconds = max(
+            0.0,
+            timeout_seconds - float(wait_summary["wait_elapsed_seconds"]),
+        )
+        self._wait_for_structural_anchors(remaining_seconds)
 
         profile, profile_path = BioRenderUiCalibrator(
             page,
@@ -626,6 +647,19 @@ class LivePlaywrightOperator:
                 "editor_ready_wait": wait_summary,
             },
         )
+
+    def _wait_for_structural_anchors(self, timeout_seconds: float) -> None:
+        """Use the remaining editor-ready budget for the full anchor combination."""
+        deadline = float(self._clock()) + max(0.0, timeout_seconds)
+        while True:
+            editor = resolve_largest_visible(self._page, EDITOR_CHROME_LOCATORS)
+            asset_panel = resolve_largest_visible(self._page, ASSET_PANEL_LOCATORS)
+            canvas = self._canvas_locator()
+            if editor is not None and asset_panel is not None and canvas is not None:
+                return
+            if float(self._clock()) >= deadline:
+                return
+            self._sleep(self._editor_ready_poll_interval_seconds)
 
     def _wait_for_editor_ready(
         self,
@@ -830,16 +864,33 @@ class LivePlaywrightOperator:
         return "timeout" in message and "navigat" in message
 
     def _search_asset(self, action: GuiAction) -> LiveActionEvidence:
+        if time.monotonic() < self._search_rate_limit_until:
+            remaining = round(self._search_rate_limit_until - time.monotonic(), 1)
+            raise SearchActionFailed(
+                f"BioRender search circuit breaker is cooling down for {remaining}s.",
+                subcode="search_rate_limited",
+                diagnostics={"circuit_breaker_open": True, "cooldown_remaining": remaining},
+                retryable=False,
+            )
         queries = [action.arguments["query"], *action.arguments.get("fallback_queries", [])]
         queries = queries[: int(action.arguments.get("max_queries", 5))]
         failures: list[str] = []
+        search = SafeAssetSearch(
+            self._page,
+            evidence_dir=self.evidence_dir,
+            policy=self.biorender_policy,
+            stop_requested=self._stop_requested,
+            timeout_seconds=30.0,
+        )
+        deadline = time.monotonic() + 30.0
         for query in queries:
             try:
-                outcome = SafeAssetSearch(
-                    self._page,
-                    evidence_dir=self.evidence_dir,
-                    policy=self.biorender_policy,
-                ).search(query, f"{action.figure_id}/{action.id}", max_attempts=2)
+                outcome = search.search(
+                    query,
+                    f"{action.figure_id}/{action.id}",
+                    max_attempts=2,
+                    deadline=deadline,
+                )
                 self._safe_candidate = outcome.selected
                 self._selected_entity_id = str(action.arguments["entity_id"])
                 self._selected_query = query
@@ -858,12 +909,30 @@ class LivePlaywrightOperator:
                         "candidate_count": len(outcome.candidates),
                         "selected_candidate": outcome.selected.record.model_dump(mode="json"),
                         "query_failures": failures,
+                        "search_diagnostics": outcome.diagnostics,
                     },
                 )
-            except (SearchNoResult, CandidateIdentityUnclear, UiLayoutChanged) as error:
+            except SearchActionFailed as error:
                 failures.append(f"{query}: {error}")
-        raise SearchNoResult(
-            f"No proven ordinary BioRender asset for queries {queries}: {failures}"
+                error.diagnostics["queries"] = queries
+                error.diagnostics["query_failures"] = failures
+                if error.subcode == "search_rate_limited":
+                    self._search_rate_limit_until = time.monotonic() + 30.0
+                if error.subcode in {
+                    "search_ui_not_found",
+                    "search_input_not_editable",
+                    "search_submit_failed",
+                    "search_results_timeout",
+                    "search_rate_limited",
+                    "page_closed",
+                    "redirected_to_login",
+                }:
+                    raise
+        raise SearchActionFailed(
+            f"No ordinary BioRender asset was found for queries {queries}: {failures}",
+            subcode="search_no_results",
+            diagnostics={"queries": queries, "query_failures": failures},
+            retryable=False,
         )
 
     def _select_asset(self, action: GuiAction) -> LiveActionEvidence:
@@ -3033,14 +3102,17 @@ class LivePlaywrightOperator:
         return path
 
     def close(self) -> None:
-        if self._context is not None:
-            self._context.close()
-        if self._playwright is not None:
-            self._playwright.stop()
+        context, playwright = self._context, self._playwright
         self._context = None
         self._playwright = None
         self._page = None
         self._current_figure_id = None
+        try:
+            if context is not None:
+                context.close()
+        finally:
+            if playwright is not None:
+                playwright.stop()
 
     @property
     def page(self) -> Any:

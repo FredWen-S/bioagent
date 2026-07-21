@@ -1,22 +1,33 @@
 from __future__ import annotations
 
 import hashlib
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app.operator.biorender.locators import (
+    ASSET_PANEL_ENTRY_LOCATORS,
+    ASSET_PANEL_LOCATORS,
     CANDIDATE_SELECTORS,
+    SEARCH_EMPTY_LOCATORS,
     SEARCH_INPUT_LOCATORS,
+    SEARCH_RATE_LIMIT_LOCATORS,
     SEARCH_RESULTS_LOCATORS,
+    ResolvedLocator,
     bounding_box,
     is_inside,
+    locator_for_spec,
     locator_text,
-    resolve_first_visible,
 )
 from app.operator.biorender.policy_guard import BioRenderPolicyGuard
-from app.operator.errors import CandidateIdentityUnclear, SearchNoResult, UiLayoutChanged
-from app.schemas.biorender_probe import AssetCandidateRecord
+from app.operator.errors import (
+    CandidateIdentityUnclear,
+    SafeStopRequested,
+    SearchActionFailed,
+)
+from app.schemas.biorender_probe import AssetCandidateRecord, LocatorEvidence
 
 
 @dataclass(slots=True)
@@ -32,6 +43,7 @@ class SearchOutcome:
     candidates: list[AssetCandidateRecord]
     screenshot_path: str
     results_screenshot_path: str
+    diagnostics: dict[str, Any]
 
 
 class SafeAssetSearch:
@@ -41,10 +53,16 @@ class SafeAssetSearch:
         *,
         evidence_dir: Path,
         policy: BioRenderPolicyGuard | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+        timeout_seconds: float = 30.0,
     ) -> None:
         self.page = page
         self.evidence_dir = evidence_dir
         self.policy = policy or BioRenderPolicyGuard()
+        self.stop_requested = stop_requested or (lambda: False)
+        self.timeout_seconds = timeout_seconds
+        self._diagnostics: dict[str, Any] = {}
+        self._last_operation = "not_started"
 
     def search(
         self,
@@ -52,40 +70,67 @@ class SafeAssetSearch:
         run_id: str,
         *,
         max_attempts: int = 2,
+        deadline: float | None = None,
     ) -> SearchOutcome:
-        if not 1 <= max_attempts <= 3:
-            raise ValueError("max_attempts must be between 1 and 3")
-        last_error: Exception | None = None
+        if not 1 <= max_attempts <= 2:
+            raise ValueError("max_attempts must be between 1 and 2")
+        deadline = deadline or (time.monotonic() + self.timeout_seconds)
+        last_error: SearchActionFailed | None = None
         for attempt in range(1, max_attempts + 1):
             try:
-                return self._search_once(query, run_id, attempt=attempt)
-            except (SearchNoResult, CandidateIdentityUnclear, UiLayoutChanged) as error:
+                return self._search_once(query, run_id, attempt=attempt, deadline=deadline)
+            except SearchActionFailed as error:
                 last_error = error
-                if attempt >= max_attempts:
+                if (
+                    attempt >= max_attempts
+                    or not error.retryable
+                    or self._remaining_ms(deadline) <= 0
+                ):
                     raise
-                self.page.wait_for_timeout(600 * attempt)
+                self._last_operation = "recovery_backoff"
+                self._interruptible_wait(500 * attempt, deadline)
         assert last_error is not None
         raise last_error
 
-    def _search_once(self, query: str, run_id: str, *, attempt: int) -> SearchOutcome:
-        self.policy.assert_page_safe(self.page)
+    def _search_once(
+        self,
+        query: str,
+        run_id: str,
+        *,
+        attempt: int,
+        deadline: float,
+    ) -> SearchOutcome:
+        self._diagnostics = {"query": query, "attempt": attempt}
+        self._check_page_state()
         self.policy.assert_query_allowed(query)
-        search = resolve_first_visible(self.page, SEARCH_INPUT_LOCATORS)
-        if search is None:
-            raise UiLayoutChanged("BioRender asset search input could not be re-located")
+        search = self._wait_for_search_ui(deadline)
         self.policy.assert_target_allowed(search.locator)
-        search.locator.click()
-        search.locator.fill(query)
         try:
-            search.locator.press("Enter")
-        except Exception:
-            pass
+            self._last_operation = "click_search_input"
+            self._call(search.locator.click, timeout=self._remaining_ms(deadline))
+            self._last_operation = "fill_search_input"
+            self._call(search.locator.fill, query, timeout=self._remaining_ms(deadline))
+            self._diagnostics["fill_executed"] = True
+            self._last_operation = "press_enter"
+            self._call(search.locator.press, "Enter", timeout=self._remaining_ms(deadline))
+            self._diagnostics["enter_executed"] = True
+        except SafeStopRequested:
+            raise
+        except Exception as error:
+            raise self._failure(
+                "search_submit_failed",
+                f"BioRender search submission failed: {error}",
+                retryable=True,
+            ) from error
 
-        results, candidate_locator = self._wait_for_stable_results()
-        self.policy.assert_page_safe(self.page)
+        results, candidate_locator = self._wait_for_stable_results(deadline)
         results_bbox = bounding_box(results.locator)
         if results_bbox is None:
-            raise UiLayoutChanged("Search results region has no observable bounding box")
+            raise self._failure(
+                "search_results_timeout",
+                "BioRender search results region has no observable bounding box.",
+                retryable=True,
+            )
 
         run_dir = self.evidence_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -119,14 +164,101 @@ class SafeAssetSearch:
             candidates=records,
             screenshot_path=str(screenshot_path),
             results_screenshot_path=str(results_path),
+            diagnostics={**self._diagnostics, "last_operation": self._last_operation},
         )
 
-    def _wait_for_stable_results(self) -> tuple[Any, Any]:
+    def _wait_for_search_ui(self, deadline: float) -> Any:
+        panel_entry_clicked = False
+        last_panel_diagnostics: list[dict[str, Any]] = []
+        last_search_diagnostics: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            self._check_page_state()
+            panel, last_panel_diagnostics = self._resolve_with_diagnostics(
+                ASSET_PANEL_LOCATORS
+            )
+            search, last_search_diagnostics = self._resolve_with_diagnostics(
+                SEARCH_INPUT_LOCATORS
+            )
+            self._diagnostics.update(
+                {
+                    "asset_panel_found": panel is not None,
+                    "asset_panel_entry_clicked": panel_entry_clicked,
+                    "asset_panel_locator_candidates": last_panel_diagnostics,
+                    "search_input_locator_candidates": last_search_diagnostics,
+                    "search_input_found": search is not None,
+                    "fill_executed": False,
+                    "enter_executed": False,
+                    "results_region_found": False,
+                }
+            )
+            if panel is not None and search is not None:
+                enabled = self._locator_flag(search.locator, "is_enabled", default=True)
+                editable = self._locator_flag(search.locator, "is_editable", default=True)
+                self._diagnostics["search_input_enabled"] = enabled
+                self._diagnostics["search_input_editable"] = editable
+                if not enabled or not editable:
+                    raise self._failure(
+                        "search_input_not_editable",
+                        "BioRender search input is visible but is not enabled/editable.",
+                        retryable=True,
+                    )
+                self._last_operation = "search_input_ready"
+                return search
+            if panel is None and not panel_entry_clicked:
+                entry, entry_diagnostics = self._resolve_with_diagnostics(
+                    ASSET_PANEL_ENTRY_LOCATORS
+                )
+                self._diagnostics["asset_panel_entry_locator_candidates"] = entry_diagnostics
+                if entry is not None:
+                    try:
+                        self._last_operation = "click_asset_panel_entry"
+                        self._call(
+                            entry.locator.click,
+                            timeout=min(1000, self._remaining_ms(deadline)),
+                        )
+                        panel_entry_clicked = True
+                        self._diagnostics["asset_panel_entry_clicked"] = True
+                    except Exception as error:
+                        self._diagnostics["asset_panel_entry_click_error"] = str(error)
+            self._last_operation = "wait_for_search_input"
+            self._interruptible_wait(100, deadline)
+        self._diagnostics["asset_panel_locator_candidates"] = last_panel_diagnostics
+        self._diagnostics["search_input_locator_candidates"] = last_search_diagnostics
+        raise self._failure(
+            "search_ui_not_found",
+            "BioRender asset panel/search input did not become usable within 30 seconds.",
+            retryable=False,
+        )
+
+    def _wait_for_stable_results(self, deadline: float) -> tuple[Any, Any]:
         previous_signature: tuple | None = None
         stable_rounds = 0
-        for _ in range(20):
-            results = resolve_first_visible(self.page, SEARCH_RESULTS_LOCATORS)
+        while time.monotonic() < deadline:
+            self._check_page_state()
+            rate_limited, rate_diagnostics = self._resolve_with_diagnostics(
+                SEARCH_RATE_LIMIT_LOCATORS
+            )
+            if rate_limited is not None:
+                self._diagnostics["rate_limit_locator_candidates"] = rate_diagnostics
+                raise self._failure(
+                    "search_rate_limited",
+                    "BioRender search is rate limited (429/Too Many Requests).",
+                    retryable=False,
+                )
+            empty, empty_diagnostics = self._resolve_with_diagnostics(SEARCH_EMPTY_LOCATORS)
+            if empty is not None:
+                self._diagnostics["empty_result_locator_candidates"] = empty_diagnostics
+                raise self._failure(
+                    "search_no_results",
+                    "BioRender search returned an explicit empty result state.",
+                    retryable=False,
+                )
+            results, result_diagnostics = self._resolve_with_diagnostics(
+                SEARCH_RESULTS_LOCATORS
+            )
+            self._diagnostics["results_locator_candidates"] = result_diagnostics
             if results is not None:
+                self._diagnostics["results_region_found"] = True
                 candidates = results.locator.locator(", ".join(CANDIDATE_SELECTORS))
                 signature = self._candidate_signature(candidates)
                 if signature and signature == previous_signature:
@@ -134,14 +266,121 @@ class SafeAssetSearch:
                 else:
                     stable_rounds = 0
                 if stable_rounds >= 2:
+                    self._last_operation = "search_results_stable"
                     return results, candidates
                 previous_signature = signature
-            self.page.wait_for_timeout(300)
-        if previous_signature:
-            raise CandidateIdentityUnclear(
-                "BioRender search results did not become geometrically stable"
+            self._last_operation = "wait_for_search_results"
+            self._interruptible_wait(100, deadline)
+        raise self._failure(
+            "search_results_timeout",
+            "BioRender search produced no stable result region or explicit empty "
+            "state within 30 seconds.",
+            retryable=True,
+        )
+
+    def _resolve_with_diagnostics(self, specs: tuple[Any, ...]) -> tuple[Any, list[dict[str, Any]]]:
+        diagnostics: list[dict[str, Any]] = []
+        selected = None
+        contexts = [("page", self.page)]
+        for index, frame in enumerate(getattr(self.page, "frames", [])[1:], start=1):
+            contexts.append((f"frame[{index}]", frame))
+        for context_name, context in contexts:
+            for spec in specs:
+                entry = {
+                    "context": context_name,
+                    "strategy": spec.strategy,
+                    "query": spec.query,
+                    "count": 0,
+                    "visible_count": 0,
+                    "bbox_count": 0,
+                    "error": None,
+                }
+                try:
+                    locator = locator_for_spec(context, spec)
+                    entry["count"] = min(locator.count(), 50)
+                    for item_index in range(entry["count"]):
+                        candidate = locator.nth(item_index)
+                        if not candidate.is_visible():
+                            continue
+                        entry["visible_count"] += 1
+                        if candidate.bounding_box() is None:
+                            continue
+                        entry["bbox_count"] += 1
+                        if selected is None:
+                            selected = ResolvedLocator(
+                                locator=candidate,
+                                evidence=LocatorEvidence(
+                                    strategy=spec.strategy,
+                                    query=spec.query,
+                                    confidence=spec.confidence,
+                                ),
+                            )
+                except Exception as error:
+                    entry["error"] = f"{type(error).__name__}: {error}"
+                diagnostics.append(entry)
+        return selected, diagnostics
+
+    def _check_page_state(self) -> None:
+        if self.stop_requested():
+            raise SafeStopRequested("Safe Stop interrupted the active search wait.")
+        try:
+            if self.page.is_closed():
+                raise self._failure("page_closed", "BioRender page was closed.", retryable=False)
+        except AttributeError:
+            pass
+        url = str(getattr(self.page, "url", "")).casefold()
+        if any(marker in url for marker in ("/login", "/sign-in", "/signin")):
+            raise self._failure(
+                "redirected_to_login",
+                "BioRender redirected to login during asset search.",
+                retryable=False,
             )
-        raise SearchNoResult("BioRender search returned no observable asset candidates")
+
+    def _interruptible_wait(self, milliseconds: int, deadline: float) -> None:
+        remaining = min(milliseconds, self._remaining_ms(deadline))
+        while remaining > 0:
+            self._check_page_state()
+            chunk = min(100, remaining)
+            self.page.wait_for_timeout(chunk)
+            remaining -= chunk
+
+    @staticmethod
+    def _locator_flag(locator: Any, method: str, *, default: bool) -> bool:
+        check = getattr(locator, method, None)
+        if not callable(check):
+            return default
+        try:
+            return bool(check())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _call(method: Any, *args: Any, timeout: int) -> Any:
+        try:
+            return method(*args, timeout=max(1, timeout))
+        except TypeError:
+            return method(*args)
+
+    @staticmethod
+    def _remaining_ms(deadline: float) -> int:
+        return max(0, round((deadline - time.monotonic()) * 1000))
+
+    def _failure(
+        self,
+        subcode: str,
+        message: str,
+        *,
+        retryable: bool,
+    ) -> SearchActionFailed:
+        return SearchActionFailed(
+            message,
+            subcode=subcode,
+            retryable=retryable,
+            diagnostics={
+                **self._diagnostics,
+                "last_operation": self._last_operation,
+            },
+        )
 
     @staticmethod
     def _candidate_signature(candidates: Any) -> tuple:

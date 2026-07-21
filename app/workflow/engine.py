@@ -4,7 +4,15 @@ from collections.abc import Callable
 
 from app.operator.action_planner import GuiActionPlanner
 from app.operator.base import GuiOperator
-from app.operator.errors import AuthenticationRequired, OperatorError, PolicyBlocked
+from app.operator.errors import (
+    AuthenticationRequired,
+    CalibrationFailed,
+    EditorPrepareFailed,
+    OperatorError,
+    PolicyBlocked,
+    SafeStopRequested,
+    SearchActionFailed,
+)
 from app.operator.safety import ActionSafetyPolicy, UnsafeActionError
 from app.planner.asset_search_planner import AssetSearchPlanner
 from app.planner.figure_planner import ScientificFigurePlanner
@@ -79,6 +87,10 @@ class WorkflowEngine:
         if status == FigureStatus.COMPLETED:
             return status
 
+        configure_stop = getattr(operator, "set_stop_requested", None)
+        if callable(configure_stop):
+            configure_stop(stop_requested)
+
         self.database.set_status(figure_id, FigureStatus.EXECUTING)
         try:
             for action in self.database.list_actions(figure_id):
@@ -101,6 +113,7 @@ class WorkflowEngine:
                     raise KeyError(f"unknown action {action.id!r}")
                 if state["status"] in {
                     ActionStatus.SUCCEEDED.value,
+                    ActionStatus.SIMULATED.value,
                     ActionStatus.VERIFIED.value,
                 }:
                     continue
@@ -237,6 +250,23 @@ class WorkflowEngine:
                     self._update_element_statuses(action, ActionStatus.EXECUTING)
                     try:
                         last_result = operator.execute(action, attempt)
+                    except SafeStopRequested as error:
+                        last_result = GuiActionResult(
+                            action_id=action.id,
+                            status=ActionStatus.PAUSED,
+                            attempt=attempt,
+                            error_type=error.error_type,
+                            message=str(error),
+                            metadata={"safe_to_retry": False, "interrupted": True},
+                        )
+                        self.database.record_action_result(figure_id, last_result)
+                        self.database.add_audit_event(
+                            "safe_stop_requested",
+                            {"action_id": action.id, "during_action": True},
+                            figure_id=figure_id,
+                        )
+                        self.database.set_status(figure_id, FigureStatus.PAUSED_APPROVAL)
+                        return FigureStatus.PAUSED_APPROVAL
                     except AuthenticationRequired as error:
                         last_result = GuiActionResult(
                             action_id=action.id,
@@ -294,6 +324,45 @@ class WorkflowEngine:
                         )
                     except OperatorError as error:
                         screenshot_path = error.screenshot_path
+                        failure_metadata: dict[str, object] = {
+                            "mode": "live",
+                            "evidence_kind": "failure",
+                        }
+                        if isinstance(error, EditorPrepareFailed):
+                            failure_metadata["editor_prepare_failure"] = {
+                                "error_type": error.error_type,
+                                "subcode": error.subcode,
+                                **error.metadata,
+                                "screenshot_path": screenshot_path
+                                or error.metadata.get("screenshot_path"),
+                            }
+                            failure_metadata["safe_to_retry"] = False
+                        elif isinstance(error, CalibrationFailed):
+                            failure_metadata["ui_calibration_failure"] = {
+                                "error_type": error.error_type,
+                                "profile_path": error.profile_path,
+                                "missing_anchors": error.missing_anchors,
+                                "anchor_diagnostics": error.anchor_diagnostics,
+                            }
+                            failure_metadata["safe_to_retry"] = False
+                        elif isinstance(error, SearchActionFailed):
+                            failure_metadata["search_failure"] = {
+                                "subcode": error.subcode,
+                                "retryable": error.retryable,
+                                **error.diagnostics,
+                            }
+                            failure_metadata["safe_to_retry"] = False
+                            self.database.add_audit_event(
+                                "search_asset_failed",
+                                {
+                                    "action_id": action.id,
+                                    "attempt": attempt,
+                                    "subcode": error.subcode,
+                                    "message": str(error),
+                                    "diagnostics": error.diagnostics,
+                                },
+                                figure_id=figure_id,
+                            )
                         last_result = GuiActionResult(
                             action_id=action.id,
                             status=ActionStatus.FAILED,
@@ -307,7 +376,7 @@ class WorkflowEngine:
                             ]
                             if screenshot_path
                             else [],
-                            metadata={"mode": "live", "evidence_kind": "failure"},
+                            metadata=failure_metadata,
                         )
                     except Exception as error:  # preserve evidence and stop safely
                         last_result = GuiActionResult(
@@ -320,7 +389,11 @@ class WorkflowEngine:
                         )
                     self.database.record_action_result(figure_id, last_result)
                     self._update_element_statuses(action, last_result.status)
-                    if last_result.status in {ActionStatus.SUCCEEDED, ActionStatus.VERIFIED}:
+                    if last_result.status in {
+                        ActionStatus.SUCCEEDED,
+                        ActionStatus.SIMULATED,
+                        ActionStatus.VERIFIED,
+                    }:
                         succeeded = True
                         break
                     if last_result.status in {
@@ -408,6 +481,8 @@ class WorkflowEngine:
                 status = "verified"
         elif action_status == ActionStatus.SUCCEEDED:
             status = "executed_unverified"
+        elif action_status == ActionStatus.SIMULATED:
+            status = "simulated"
         elif action_status == ActionStatus.BLOCKED_BY_POLICY:
             status = "blocked_by_policy"
         elif action_status == ActionStatus.UNKNOWN:

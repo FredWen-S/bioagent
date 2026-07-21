@@ -34,12 +34,18 @@ class DryRunOperator:
         )
         return GuiActionResult(
             action_id=action.id,
-            status=ActionStatus.SUCCEEDED,
+            status=ActionStatus.SIMULATED,
             attempt=attempt,
             message="Action simulated successfully.",
             screenshot_path=str(evidence_path),
             expected_bbox=action.expected_bbox,
-            metadata={"mode": "dry-run", "evidence_kind": "action_manifest"},
+            metadata={
+                "mode": "dry-run",
+                "evidence_kind": "action_manifest",
+                "simulation_status": "simulated",
+                "policy_status": "policy_allowed",
+                "live_execution_status": "planned",
+            },
         )
 
     def close(self) -> None:

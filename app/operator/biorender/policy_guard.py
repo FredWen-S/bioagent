@@ -164,11 +164,16 @@ class BioRenderPolicyGuard:
     def _control_text(locator: Any) -> str:
         parts: list[str] = []
         try:
-            value = locator.inner_text(timeout=1000)
+            value = locator.evaluate("el => (el.innerText || el.textContent || '').trim()")
             if value:
                 parts.append(value)
         except Exception:
-            pass
+            try:
+                value = locator.inner_text(timeout=100)
+                if value:
+                    parts.append(value)
+            except Exception:
+                pass
         for attribute in ("aria-label", "title", "data-testid", "data-label"):
             try:
                 value = locator.get_attribute(attribute)

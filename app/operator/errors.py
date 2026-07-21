@@ -62,6 +62,42 @@ class SearchNoResult(OperatorError):
     error_type = "search_no_result"
 
 
+class SearchActionFailed(OperatorError):
+    VALID_SUBCODES = frozenset(
+        {
+            "search_ui_not_found",
+            "search_input_not_editable",
+            "search_submit_failed",
+            "search_results_timeout",
+            "search_no_results",
+            "search_rate_limited",
+            "page_closed",
+            "redirected_to_login",
+        }
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        subcode: str,
+        diagnostics: dict[str, Any] | None = None,
+        retryable: bool = False,
+        screenshot_path: str | None = None,
+    ) -> None:
+        if subcode not in self.VALID_SUBCODES:
+            raise ValueError(f"unknown search failure subcode: {subcode!r}")
+        super().__init__(message, screenshot_path=screenshot_path)
+        self.error_type = subcode
+        self.subcode = subcode
+        self.diagnostics = dict(diagnostics or {})
+        self.retryable = retryable
+
+
+class SafeStopRequested(OperatorError):
+    error_type = "safe_stop_requested"
+
+
 class DragDropFailed(OperatorError):
     error_type = "drag_drop_failed"
 
@@ -73,9 +109,18 @@ class UnsupportedLiveAction(OperatorError):
 class CalibrationFailed(OperatorError):
     error_type = "ui_calibration_failed"
 
-    def __init__(self, message: str, *, profile_path: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        profile_path: str | None = None,
+        missing_anchors: list[str] | None = None,
+        anchor_diagnostics: list[dict[str, Any]] | None = None,
+    ) -> None:
         super().__init__(message)
         self.profile_path = profile_path
+        self.missing_anchors = list(missing_anchors or [])
+        self.anchor_diagnostics = list(anchor_diagnostics or [])
 
 
 class PolicyBlocked(OperatorError):

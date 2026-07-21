@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="BioRender GUI Agent 的安全图形化控制台">
+  <meta name="description" content="BioRender 图形化安全工作流">
   <title>BioRender 科研绘图助手</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23176b62'/%3E%3Cpath d='M18 18h17c8 0 13 4 13 10 0 4-2 7-6 9 5 2 7 5 7 10 0 8-6 12-15 12H18V18zm10 9v7h7c3 0 5-1 5-4s-2-3-5-3h-7zm0 15v8h8c4 0 6-1 6-4s-2-4-6-4h-8z' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/ui-assets/styles.css">
@@ -11,207 +11,264 @@
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
   <header class="app-header">
-    <div class="header-copy">
+    <div>
       <p class="eyebrow">BioRender GUI Agent</p>
       <h1>BioRender 科研绘图助手</h1>
-      <p>使用普通 BioRender 素材完成科研绘图，不调用 BioRender AI Generate</p>
+      <p class="header-subtitle">按顺序完成登录、画布、需求、真实执行和结果检查。真实 BioRender 线上验收尚未完成。</p>
     </div>
     <div class="safety-badges" aria-label="安全状态">
       <span class="badge badge-safe">BioRender AI：已禁用</span>
-      <span class="badge badge-neutral">AI Credits：不会主动使用</span>
+      <span class="badge badge-neutral">安全预演：可用</span>
+      <span class="badge badge-neutral">不读取或保存密码、Cookie</span>
     </div>
   </header>
 
   <main id="main-content">
-    <section class="notice" aria-label="验收状态">
-      <strong>当前验证范围：</strong>
-      <span>本地兼容编辑器已验证</span>
-      <span aria-hidden="true">·</span>
-      <span>真实 BioRender 线上验收尚未完成</span>
+    <section class="environment-bar" aria-label="环境状态">
+      <div><span>Backend</span><strong id="backend-status">检查中</strong></div>
+      <div><span>Browser</span><strong id="browser-status">检查中</strong></div>
+      <div><span>Database</span><strong id="database-status">检查中</strong></div>
+      <div><span>运行版本</span><strong id="version-status">检查中</strong></div>
+      <div><span>BioRender AI</span><strong>禁用</strong></div>
+      <button id="refresh-status" class="button button-quiet" type="button">刷新状态</button>
     </section>
 
-    <section class="status-grid" aria-labelledby="environment-title">
-      <div class="section-heading full-span">
-        <div>
-          <p class="eyebrow">开始前检查</p>
-          <h2 id="environment-title">环境状态</h2>
+    <nav class="stepper" aria-label="任务步骤">
+      <ol>
+        <li data-step-indicator="1"><span>1</span><strong>登录</strong></li>
+        <li data-step-indicator="2"><span>2</span><strong>画布</strong></li>
+        <li data-step-indicator="3"><span>3</span><strong>绘图需求</strong></li>
+        <li data-step-indicator="4"><span>4</span><strong>执行</strong></li>
+        <li data-step-indicator="5"><span>5</span><strong>完成</strong></li>
+      </ol>
+    </nav>
+
+    <section class="workflow-banner" aria-live="polite">
+      <div>
+        <p class="eyebrow" id="step-kicker">当前步骤 1 / 5</p>
+        <h2 id="step-title">登录 BioRender</h2>
+      </div>
+      <div class="workflow-guidance">
+        <strong id="state-label">正在读取状态</strong>
+        <span id="state-reason">正在从后端读取当前任务状态。</span>
+        <span id="next-action">下一步：等待状态检查</span>
+      </div>
+    </section>
+
+    <section class="wizard" aria-label="BioRender guided workflow">
+      <article class="step-panel" data-step-panel="1">
+        <div class="panel-heading">
+          <div><p class="step-number">第一步</p><h3>登录 BioRender</h3></div>
+          <span class="status-badge" id="login-state">未检查</span>
         </div>
-        <button id="refresh-status" class="button button-quiet" type="button">刷新状态</button>
-      </div>
-      <article class="status-card"><span>后端服务</span><strong id="backend-status">检查中</strong></article>
-      <article class="status-card"><span>浏览器登录</span><strong id="login-status">尚未验证</strong></article>
-      <article class="status-card"><span>数据库</span><strong id="database-status">检查中</strong></article>
-      <article class="status-card"><span>当前任务</span><strong id="active-status">无运行任务</strong></article>
-      <article class="status-card"><span>本地兼容编辑器</span><strong>已验证</strong></article>
-      <article class="status-card status-card-caution"><span>真实 BioRender</span><strong>待人工验收</strong></article>
-    </section>
+        <p class="instruction">登录必须由您本人在 BioRender 官方页面完成。助手不会输入、保存或展示密码，也不会读取 Cookie。</p>
+        <div class="fact-grid">
+          <div><span>浏览器状态</span><strong id="login-browser-state">未启动</strong></div>
+          <div><span>登录状态</span><strong id="login-detail-state">未检查</strong></div>
+        </div>
+        <div class="action-row">
+          <button id="open-login" class="button button-primary" type="button">打开 BioRender 登录页面</button>
+          <button id="complete-login" class="button button-secondary" type="button" disabled>我已完成登录，检查状态</button>
+        </div>
+        <p id="login-message" class="field-message" aria-live="polite">请先打开登录页面。</p>
+        <p class="safety-note">登录任务结束后，浏览器 busy 状态会由后端释放。</p>
+      </article>
 
-    <div class="workspace-grid">
-      <div class="configuration-column">
-        <section class="panel" aria-labelledby="task-title">
-          <div class="section-heading">
-            <div>
-              <p class="step-number">步骤 1</p>
-              <h2 id="task-title">新建绘图任务</h2>
-            </div>
+      <article class="step-panel" data-step-panel="2" hidden>
+        <div class="panel-heading">
+          <div><p class="step-number">第二步</p><h3>指定目标画布</h3></div>
+          <span class="status-badge" id="canvas-state">未检查</span>
+        </div>
+        <label for="editor-url">BioRender Figure URL</label>
+        <input id="editor-url" type="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="https://app.biorender.com/figure/...">
+        <label class="check-label"><input id="confirm-blank" type="checkbox"> 我已确认使用可丢弃的空白 Figure</label>
+        <p class="safety-note">只允许 HTTPS BioRender 官方域名。检查会验证 URL 可访问、登录仍有效且浏览器没有执行其他任务。</p>
+        <div class="action-row">
+          <button id="check-canvas" class="button button-primary" type="button" disabled>检查画布</button>
+        </div>
+        <div id="canvas-result" class="result-callout" aria-live="polite">尚未检查画布。</div>
+        <div id="canvas-details" class="fact-grid" hidden>
+          <div><span>Figure 标识</span><strong id="canvas-figure-id">-</strong></div>
+          <div><span>标题</span><strong id="canvas-title">-</strong></div>
+        </div>
+      </article>
+
+      <article class="step-panel" data-step-panel="3" hidden>
+        <div class="panel-heading">
+          <div><p class="step-number">第三步</p><h3>指定绘图需求</h3></div>
+          <span class="status-badge" id="prompt-state">未解析</span>
+        </div>
+        <fieldset class="mode-switch">
+          <legend>需求模式</legend>
+          <label><input type="radio" name="task-mode" value="preset" checked> 预设任务</label>
+          <label><input type="radio" name="task-mode" value="prompt"> Prompt 输入</label>
+        </fieldset>
+        <div class="prompt-sequence" aria-label="第三步操作顺序">
+          <strong>解析需求</strong><span>→</span><strong>查看任务摘要</strong><span>→</span><strong>进入执行</strong>
+        </div>
+        <div id="preset-panel" class="task-mode-panel">
+          <label class="choice-card"><input type="radio" name="preset" value="pd1" checked><span><strong>PD-1 / PD-L1 示例</strong><small>验证素材、标签、连接和布局的完整流程。</small></span></label>
+        </div>
+        <div id="prompt-panel" class="task-mode-panel" hidden>
+          <label for="prompt-input">用自然语言描述希望绘制的科研图</label>
+          <textarea id="prompt-input" rows="7" maxlength="3000" placeholder="例如：绘制 PD-1 与 PD-L1 结合并抑制 T 细胞活化的机制图，左到右布局，标出关键分子。"></textarea>
+          <div class="field-meta"><span>示例：绘制一个从配体结合到信号抑制的左到右机制图。</span><span id="prompt-count">0 / 3000</span></div>
+        </div>
+        <p class="safety-note prompt-safety-note">预设任务和自定义 Prompt 都会先生成可审计的任务计划，确认摘要后再进入真实执行。</p>
+        <div class="action-row prompt-parse-action">
+          <button id="parse-prompt" class="button button-primary" type="button">解析需求</button>
+          <span id="prompt-guidance" class="field-message" aria-live="polite">请先解析绘图需求。</span>
+        </div>
+        <div id="plan-summary" class="plan-summary" hidden>
+          <div class="summary-header"><strong>系统解析后的任务摘要</strong><span id="plan-support-status"></span></div>
+          <div class="summary-grid">
+            <div><span>预计素材数量</span><strong id="summary-assets">0</strong></div>
+            <div><span>标签数量</span><strong id="summary-labels">0</strong></div>
+            <div><span>连接关系数量</span><strong id="summary-relations">0</strong></div>
           </div>
+          <p><strong>布局：</strong><span id="summary-layout">-</span></p>
+          <p><strong>风险或不支持内容：</strong><span id="summary-risks">无</span></p>
+          <p class="safety-note">查看任务摘要后即可进入执行步骤。真实执行仍会再次要求空白画布和 Live 确认。</p>
+        </div>
+      </article>
 
-          <fieldset class="segmented-control">
-            <legend class="sr-only">任务类型</legend>
-            <label><input type="radio" name="task-mode" value="preset" checked> 使用预设图形</label>
-            <label><input type="radio" name="task-mode" value="custom"> 自定义简单图形</label>
-          </fieldset>
-
-          <div id="preset-panel" class="form-section">
-            <label class="choice-card">
-              <input type="radio" name="preset" value="pd1" checked>
-              <span><strong>PD-1 / PD-L1 机制图</strong><small>用于验证完整的素材、标签、连接器和布局流程。</small></span>
-            </label>
+      <article class="step-panel" data-step-panel="4" hidden>
+        <div class="panel-heading">
+          <div><p class="step-number">第四步</p><h3>执行任务</h3></div>
+          <span class="status-badge" id="execution-state">未开始</span>
+        </div>
+        <div class="live-warning"><strong>即将修改真实 BioRender 画布</strong><span>只会使用普通素材，不会调用 BioRender AI Generate、导出、分享或购买功能。</span></div>
+        <div class="run-context">
+          <div><span>目标画布</span><strong id="run-canvas">-</strong></div>
+          <div><span>任务摘要</span><strong id="run-task">-</strong></div>
+        </div>
+        <section id="dry-run-review" class="dry-run-review" hidden aria-live="polite">
+          <div class="summary-header"><strong>需要您确认的安全预演内容</strong><span class="status-badge warning">未修改真实画布</span></div>
+          <div class="dry-review-grid">
+            <article>
+              <h4>1. 目标画布</h4>
+              <p><strong>Figure URL：</strong><span id="dry-canvas-url">-</span></p>
+              <p><strong>测试画布：</strong><span id="dry-canvas-confirmed">-</span></p>
+            </article>
+            <article>
+              <h4>2. 任务摘要</h4>
+              <p><strong>Figure 标题：</strong><span id="dry-title">-</span></p>
+              <div class="dry-counts"><span>素材 <strong id="dry-assets">0</strong></span><span>标签 <strong id="dry-labels">0</strong></span><span>连接 <strong id="dry-connections">0</strong></span><span>动作 <strong id="dry-total-actions">0</strong></span></div>
+            </article>
           </div>
-
-          <div id="custom-panel" class="form-section" hidden>
-            <div class="field-grid">
-              <label>图形名称<input id="custom-title" type="text" maxlength="120" value="自定义机制图"></label>
-              <label>研究主题<input id="research-topic" type="text" maxlength="500" placeholder="例如：蛋白 A 促进蛋白 B"></label>
-            </div>
-            <label>备注（可选）<textarea id="custom-notes" maxlength="1000" rows="2" placeholder="只填写有助于解释图形的信息"></textarea></label>
-
-            <div class="subsection-heading">
-              <div><h3>素材列表</h3><p>使用普通素材搜索词；最多 15 个素材。</p></div>
-              <button id="add-asset" class="button button-secondary" type="button">添加素材</button>
-            </div>
-            <div id="asset-list" class="repeat-list" aria-live="polite"></div>
-
-            <div class="subsection-heading">
-              <div><h3>连接关系</h3><p>所有素材都需要参与至少一条关系。</p></div>
-              <button id="add-relation" class="button button-secondary" type="button">添加关系</button>
-            </div>
-            <div id="relation-list" class="repeat-list" aria-live="polite"></div>
-
-            <label>布局<select id="layout-select" disabled><option value="auto">自动布局（当前唯一支持）</option></select></label>
+          <div class="dry-review-grid">
+            <article>
+              <h4>3. 即将执行的主要动作</h4>
+              <p><strong>搜索素材</strong></p><ul id="dry-searches"><li>等待预演摘要</li></ul>
+              <p><strong>插入素材</strong></p><ul id="dry-inserts"><li>等待预演摘要</li></ul>
+              <p><strong>添加标签</strong></p><ul id="dry-label-actions"><li>等待预演摘要</li></ul>
+              <p><strong>添加连接</strong></p><ul id="dry-connection-actions"><li>等待预演摘要</li></ul>
+              <p><strong>布局：</strong><span id="dry-layout">-</span></p>
+            </article>
+            <article>
+              <h4>4. 安全限制</h4>
+              <ul class="safety-limit-list">
+                <li>不调用 BioRender AI Generate</li>
+                <li>不 Export</li>
+                <li>不 Share</li>
+                <li>不 Purchase</li>
+                <li>不修改其他 Figure</li>
+              </ul>
+              <h4>5. 预演结果</h4>
+              <p><strong>Policy 检查：</strong><span id="dry-policy">-</span></p>
+              <p><strong>被阻止动作：</strong><span id="dry-blocked">0</span></p>
+              <p><strong>警告：</strong><span id="dry-warnings">0</span></p>
+              <p><strong>人工复核：</strong></p><ul id="dry-review-items"><li>等待预演摘要</li></ul>
+              <p><strong>Live Run：</strong><span id="dry-live-ready">-</span></p>
+            </article>
           </div>
+          <article class="dry-evidence">
+            <h4>6. 预演证据</h4>
+            <p id="dry-screenshot-note">安全预演不产生真实画布截图。</p>
+            <p><strong>Audit event：</strong><span id="dry-audit">-</span></p>
+            <div class="table-wrap"><table><thead><tr><th>序号</th><th>动作</th><th>状态</th><th>风险 / 策略</th></tr></thead><tbody id="dry-action-body"></tbody></table></div>
+          </article>
         </section>
+        <div class="progress-heading"><span>总进度</span><strong id="progress-percent">0%</strong></div>
+        <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
+        <ol id="progress-steps" class="progress-steps">
+          <li data-step="prepare"><span>1</span><strong>准备浏览器</strong><small>等待</small></li>
+          <li data-step="policy"><span>2</span><strong>检查安全策略</strong><small>等待</small></li>
+          <li data-step="search"><span>3</span><strong>搜索素材</strong><small>等待</small></li>
+          <li data-step="insert"><span>4</span><strong>插入素材</strong><small>等待</small></li>
+          <li data-step="labels"><span>5</span><strong>添加标签</strong><small>等待</small></li>
+          <li data-step="connect"><span>6</span><strong>添加连接</strong><small>等待</small></li>
+          <li data-step="layout"><span>7</span><strong>调整布局</strong><small>等待</small></li>
+          <li data-step="save"><span>8</span><strong>等待保存</strong><small>等待</small></li>
+          <li data-step="verify"><span>9</span><strong>验证结果</strong><small>等待</small></li>
+        </ol>
+        <div class="run-metrics">
+          <div><span>当前步骤</span><strong id="current-action">-</strong></div>
+          <div><span>正在操作的元素</span><strong id="current-element">-</strong></div>
+          <div><span>已完成动作</span><strong id="completed-actions">0</strong></div>
+          <div><span>已运行时间</span><strong id="elapsed-time">0 秒</strong></div>
+        </div>
+        <p id="job-message" class="field-message" aria-live="polite">开始执行前，页面会再次显示画布和任务摘要。</p>
+        <div class="execution-observer">
+          <div>
+            <h4>最近日志</h4>
+            <ol id="recent-logs" class="recent-logs"><li>暂无运行日志。</li></ol>
+          </div>
+          <div>
+            <h4>最近截图</h4>
+            <div id="execution-evidence" class="execution-evidence"><span>暂无截图</span></div>
+          </div>
+        </div>
+        <p class="field-message">当前证据来源：<strong id="evidence-source">尚无 Live Run</strong></p>
+        <div class="execution-actions">
+          <button id="run-dry-run" class="button button-secondary" type="button" disabled>执行安全预演</button>
+          <button id="confirm-dry-run" class="button button-secondary" type="button" disabled>确认预演结果</button>
+          <button id="start-live" class="button button-danger" type="button" disabled>开始执行</button>
+          <button id="resume-run" class="button button-secondary" type="button" disabled>继续上次任务</button>
+        </div>
+        <p id="dry-run-confirm-reason" class="field-message confirm-reason" aria-live="polite">尚未完成安全预演。</p>
+        <p class="field-message">失败 subcode：<strong id="failure-subcode">-</strong></p>
+        <details class="advanced-info"><summary>高级信息</summary><pre id="advanced-details">暂无运行详情。</pre></details>
+      </article>
 
-        <section class="panel" aria-labelledby="figure-settings-title">
-          <div class="section-heading">
-            <div><p class="step-number">步骤 2</p><h2 id="figure-settings-title">BioRender Figure 设置</h2></div>
-          </div>
-          <div class="callout">
-            请使用一个可丢弃的空白 BioRender Figure。系统不会自动输入账号密码。
-          </div>
-          <label>空白 Figure URL
-            <input id="editor-url" type="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="https://app.biorender.com/...">
-          </label>
-          <div class="button-row">
-            <button id="check-url" class="button button-secondary" type="button">检查 URL</button>
-            <button id="open-login" class="button button-secondary" type="button">打开登录窗口</button>
-            <button id="complete-login" class="button button-quiet" type="button" disabled>我已完成登录</button>
-            <button id="calibrate" class="button button-secondary" type="button" disabled>仅校准界面</button>
-          </div>
-          <p id="url-result" class="field-message" aria-live="polite"></p>
-        </section>
-
-        <section class="panel" aria-labelledby="run-mode-title">
-          <div class="section-heading">
-            <div><p class="step-number">步骤 3</p><h2 id="run-mode-title">选择运行模式</h2></div>
-          </div>
-          <div class="mode-grid">
-            <label class="choice-card">
-              <input type="radio" name="run-mode" value="dry" checked>
-              <span><strong>安全预演</strong><small>只生成计划和检查任务，不操作真实 BioRender 页面。</small></span>
-            </label>
-            <label class="choice-card choice-live">
-              <input type="radio" name="run-mode" value="live">
-              <span><strong>真实执行</strong><small>会使用浏览器实际操作当前 BioRender Figure。</small></span>
-            </label>
-          </div>
-
-          <div id="live-confirmation" class="confirmation-box" hidden>
-            <h3>真实执行确认</h3>
-            <ul>
-              <li>本次操作将修改当前 BioRender Figure。</li>
-              <li>系统不会调用 BioRender AI Generate。</li>
-              <li>系统不会自动导出、分享、购买或升级订阅。</li>
-            </ul>
-            <label class="check-label"><input id="confirm-disposable" type="checkbox"> 我已确认使用可丢弃的空白 Figure</label>
-          </div>
-
-          <div class="primary-actions">
-            <button id="inspect-plan" class="button button-secondary" type="button">检查绘图方案</button>
-            <button id="start-dry" class="button button-primary" type="button">开始安全预演</button>
-            <button id="start-live" class="button button-danger" type="button" disabled>开始绘制</button>
-          </div>
-        </section>
-      </div>
-
-      <div class="monitor-column">
-        <section class="panel sticky-panel" aria-labelledby="progress-title">
-          <div class="section-heading">
-            <div><p class="eyebrow">运行监控</p><h2 id="progress-title">执行进度</h2></div>
-            <span id="progress-percent" class="progress-value">0%</span>
-          </div>
-          <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
-          <ol id="progress-steps" class="progress-steps">
-            <li data-step="plan"><span>1</span><div><strong>检查任务</strong><small>等待</small></div></li>
-            <li data-step="calibrate"><span>2</span><div><strong>校准 BioRender 界面</strong><small>等待</small></div></li>
-            <li data-step="policy"><span>3</span><div><strong>检查安全策略</strong><small>等待</small></div></li>
-            <li data-step="search"><span>4</span><div><strong>搜索素材</strong><small>等待</small></div></li>
-            <li data-step="place"><span>5</span><div><strong>放置素材</strong><small>等待</small></div></li>
-            <li data-step="labels"><span>6</span><div><strong>添加标签</strong><small>等待</small></div></li>
-            <li data-step="connect"><span>7</span><div><strong>添加连接关系</strong><small>等待</small></div></li>
-            <li data-step="layout"><span>8</span><div><strong>调整布局</strong><small>等待</small></div></li>
-            <li data-step="verify"><span>9</span><div><strong>验证结果</strong><small>等待</small></div></li>
-            <li data-step="confirm"><span>10</span><div><strong>等待用户确认</strong><small>等待</small></div></li>
-          </ol>
-          <div class="button-row monitor-actions">
-            <button id="safe-stop" class="button button-secondary" type="button" disabled>暂停或安全停止</button>
-            <button id="resume-run" class="button button-secondary" type="button" disabled>继续上次任务</button>
-            <button id="verify-run" class="button button-secondary" type="button" disabled>重新验证</button>
-          </div>
-          <p id="job-message" class="field-message" aria-live="polite">尚未开始任务。</p>
-        </section>
-      </div>
-    </div>
-
-    <section class="panel" aria-labelledby="elements-title">
-      <div class="section-heading"><div><p class="eyebrow">观察与验证</p><h2 id="elements-title">元素状态</h2></div></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>元素</th><th>类型</th><th>当前状态</th><th>验证结果</th><th>说明</th></tr></thead>
-          <tbody id="elements-body"><tr><td colspan="5" class="empty-cell">尚无元素状态。</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel" aria-labelledby="evidence-title">
-      <div class="section-heading"><div><p class="eyebrow">真实生成文件</p><h2 id="evidence-title">截图与证据</h2></div></div>
-      <div id="evidence-grid" class="evidence-grid"><p class="empty-card">暂无截图</p></div>
-    </section>
-
-    <section class="panel result-panel" aria-labelledby="result-title">
-      <div class="section-heading"><div><p class="eyebrow">任务摘要</p><h2 id="result-title">最终结果</h2></div></div>
-      <div id="result-grid" class="result-grid">
-        <div><span>Run ID</span><strong id="result-run-id">—</strong></div>
-        <div><span>总元素数</span><strong id="result-total">0</strong></div>
-        <div><span>已验证</span><strong id="result-verified">0</strong></div>
-        <div><span>需要检查</span><strong id="result-review">0</strong></div>
-        <div><span>失败</span><strong id="result-failed">0</strong></div>
-        <div><span>安全阻止</span><strong id="result-blocked">0</strong></div>
-        <div><span>保存状态</span><strong id="result-save">尚未观察</strong></div>
-        <div><span>Workflow 状态</span><strong id="result-workflow">未开始</strong></div>
-      </div>
-      <p id="result-message" class="result-message">开始任务后，这里会显示基于真实持久化状态的结果。</p>
-      <details>
-        <summary>查看运行详情</summary>
-        <pre id="advanced-details">暂无详细信息。</pre>
-      </details>
+      <article class="step-panel" data-step-panel="5" hidden>
+        <div class="panel-heading">
+          <div><p class="step-number">第五步</p><h3>查看完成结果</h3></div>
+          <span class="status-badge" id="result-state">尚无结果</span>
+        </div>
+        <div id="result-message" class="result-callout">任务完成后，结果和证据会显示在这里。unknown 不会被标记为成功。</div>
+        <div class="result-grid">
+          <div><span>最终状态</span><strong id="result-status">-</strong></div>
+          <div><span>Run ID</span><strong id="result-run-id">-</strong></div>
+          <div><span>已验证元素</span><strong id="result-verified">0</strong></div>
+          <div><span>需要人工检查</span><strong id="result-review">0</strong></div>
+          <div><span>失败</span><strong id="result-failed">0</strong></div>
+          <div><span>Policy Block</span><strong id="result-blocked">0</strong></div>
+          <div><span>保存状态</span><strong id="result-save">-</strong></div>
+          <div><span>完成时间</span><strong id="result-completed-at">-</strong></div>
+        </div>
+        <div class="result-actions">
+          <button id="verify-run" class="button button-secondary" type="button" disabled>重新验证</button>
+          <button id="continue-run" class="button button-secondary" type="button" disabled>继续未完成任务</button>
+          <button id="view-run" class="button button-quiet" type="button">查看运行详情</button>
+          <button id="new-task" class="button button-primary" type="button">开始新任务</button>
+        </div>
+        <div class="evidence-layout">
+          <div><h4>最终截图</h4><div id="evidence-grid" class="evidence-grid"><p class="empty-card">暂无截图</p></div></div>
+          <div><h4>元素明细</h4><div class="table-wrap"><table><thead><tr><th>元素</th><th>类型</th><th>状态</th><th>说明</th></tr></thead><tbody id="elements-body"><tr><td colspan="4" class="empty-cell">暂无元素状态。</td></tr></tbody></table></div></div>
+        </div>
+        <details id="result-details" class="advanced-info"><summary>高级信息</summary><pre id="result-json">暂无运行详情。</pre></details>
+      </article>
     </section>
   </main>
 
+  <div class="bottom-actions" role="toolbar" aria-label="步骤操作">
+    <span id="next-step-hint" class="next-step-hint" aria-live="polite"></span>
+    <button id="previous-step" class="button button-secondary" type="button">上一步</button>
+    <button id="next-step" class="button button-primary" type="button">下一步</button>
+    <button id="safe-stop" class="button button-danger" type="button" disabled>安全停止</button>
+  </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <footer>
-    <p>图形化界面是现有 Workflow 的可视化入口，不会绕过现有安全策略。</p>
-  </footer>
   <script src="/ui-assets/app.js" defer></script>
 </body>
 </html>

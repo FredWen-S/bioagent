@@ -26,6 +26,36 @@ from tests.mocks.fake_playwright import FakeElement, FakePage
 CANVAS_SELECTOR = CANVAS_LOCATORS[0].query
 
 
+def test_close_stops_playwright_even_when_persistent_context_close_fails(
+    tmp_path: Path,
+) -> None:
+    class BrokenContext:
+        def close(self) -> None:
+            raise RuntimeError("context transport already closed")
+
+    class PlaywrightHandle:
+        stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    operator = LivePlaywrightOperator(
+        profile_dir=tmp_path / "profile",
+        evidence_dir=tmp_path / "evidence",
+        headed=False,
+    )
+    handle = PlaywrightHandle()
+    operator._context = BrokenContext()
+    operator._playwright = handle
+
+    with pytest.raises(RuntimeError, match="context transport already closed"):
+        operator.close()
+
+    assert handle.stopped is True
+    assert operator._context is None
+    assert operator._playwright is None
+
+
 def _canvas_element() -> FakeElement:
     return FakeElement(
         bbox={"x": 320, "y": 80, "width": 1000, "height": 700},

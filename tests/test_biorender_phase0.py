@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 from pathlib import Path
 
@@ -10,10 +11,13 @@ from PIL import Image, ImageDraw
 from app.cli import cmd_calibrate_ui, cmd_live_search_asset, cmd_phase0_search_drag
 from app.operator.biorender.calibration import BioRenderUiCalibrator
 from app.operator.biorender.locators import (
+    ASSET_PANEL_LOCATORS,
     CANDIDATE_SELECTORS,
     CANVAS_LOCATORS,
+    EDITOR_CHROME_LOCATORS,
     INTERACTIVE_SELECTOR,
     MODAL_SELECTOR,
+    SEARCH_INPUT_LOCATORS,
     SEARCH_RESULTS_LOCATORS,
 )
 from app.operator.biorender.observer import PixelDiffInsertionObserver
@@ -25,7 +29,7 @@ from app.operator.biorender.reconciliation import (
 )
 from app.operator.biorender.search import SafeAssetSearch
 from app.operator.dry_run import DryRunOperator
-from app.operator.errors import CalibrationFailed, PolicyBlocked
+from app.operator.errors import CalibrationFailed, PolicyBlocked, SearchActionFailed
 from app.schemas.biorender_probe import (
     AssetCandidateRecord,
     InsertionObservation,
@@ -83,6 +87,9 @@ def test_ordinary_asset_search_is_allowed_and_candidate_is_proven(tmp_path: Path
     page = FakePage(
         selector_map={
             "searchbox-fixture": [search_input],
+            ASSET_PANEL_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 0, "width": 320, "height": 900})
+            ],
             SEARCH_RESULTS_LOCATORS[0].query: [results],
             INTERACTIVE_SELECTOR: [],
             MODAL_SELECTOR: [],
@@ -90,9 +97,72 @@ def test_ordinary_asset_search_is_allowed_and_candidate_is_proven(tmp_path: Path
     )
     outcome = SafeAssetSearch(page, evidence_dir=tmp_path).search("T cell", "probe_safe")
     assert search_input.filled_value == "T cell"
+    assert search_input.pressed_keys == ["Enter"]
+    assert outcome.diagnostics["search_input_found"] is True
+    assert outcome.diagnostics["fill_executed"] is True
+    assert outcome.diagnostics["enter_executed"] is True
     assert outcome.selected.record.draggable is True
     assert outcome.selected.record.in_results_region is True
     assert outcome.selected.record.rejected_reasons == []
+
+
+def test_search_ui_failure_records_locator_counts_without_submitting(
+    tmp_path: Path,
+) -> None:
+    panel = FakeElement(
+        text="Icons and templates",
+        bbox={"x": 0, "y": 0, "width": 320, "height": 900},
+    )
+    page = FakePage(selector_map={ASSET_PANEL_LOCATORS[0].query: [panel]})
+
+    with pytest.raises(SearchActionFailed) as raised:
+        SafeAssetSearch(
+            page,
+            evidence_dir=tmp_path,
+            timeout_seconds=0.001,
+        ).search("T cell", "missing-search-ui", max_attempts=1)
+
+    error = raised.value
+    assert error.subcode == "search_ui_not_found"
+    assert error.retryable is False
+    assert error.diagnostics["query"] == "T cell"
+    assert error.diagnostics["attempt"] == 1
+    assert error.diagnostics["asset_panel_found"] is True
+    assert error.diagnostics["search_input_found"] is False
+    assert error.diagnostics["fill_executed"] is False
+    assert error.diagnostics["enter_executed"] is False
+    assert error.diagnostics["last_operation"] == "wait_for_search_input"
+    assert all(
+        {"count", "visible_count", "bbox_count"} <= candidate.keys()
+        for candidate in error.diagnostics["search_input_locator_candidates"]
+    )
+
+
+def test_search_rejects_visible_but_non_editable_input_without_fill(
+    tmp_path: Path,
+) -> None:
+    search_input = FakeElement(
+        bbox={"x": 10, "y": 20, "width": 250, "height": 36},
+        attrs={"role": "searchbox", "accessible_name": "Search assets"},
+        editable=False,
+    )
+    page = FakePage(
+        selector_map={
+            "searchbox-fixture": [search_input],
+            ASSET_PANEL_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 0, "width": 320, "height": 900})
+            ],
+        }
+    )
+
+    with pytest.raises(SearchActionFailed) as raised:
+        SafeAssetSearch(page, evidence_dir=tmp_path).search(
+            "T cell", "non-editable-search", max_attempts=1
+        )
+
+    assert raised.value.subcode == "search_input_not_editable"
+    assert search_input.filled_value is None
+    assert search_input.pressed_keys == []
 
 
 def test_expected_bbox_is_never_automatically_observed() -> None:
@@ -285,6 +355,116 @@ def test_calibration_missing_search_input_saves_evidence_then_fails(tmp_path: Pa
     assert Path(captured.value.profile_path).exists()
 
 
+def test_calibration_accepts_structural_anchors_with_hidden_optional_controls(
+    tmp_path: Path,
+) -> None:
+    hidden_search = FakeElement(
+        bbox={"x": 10, "y": 20, "width": 250, "height": 36},
+        visible=False,
+    )
+    page = FakePage(
+        selector_map={
+            EDITOR_CHROME_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 0, "width": 1440, "height": 1000})
+            ],
+            ASSET_PANEL_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 40, "width": 300, "height": 960})
+            ],
+            CANVAS_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 320, "y": 80, "width": 1000, "height": 700})
+            ],
+            SEARCH_INPUT_LOCATORS[2].query: [hidden_search],
+            INTERACTIVE_SELECTOR: [],
+            MODAL_SELECTOR: [],
+            "input[type='password']": [],
+        }
+    )
+
+    profile, profile_path = BioRenderUiCalibrator(page, output_dir=tmp_path).calibrate()
+
+    assert profile.editor_loaded is True
+    assert profile.url == "https://app.biorender.com/<redacted>"
+    assert profile.missing_anchors == []
+    assert profile.search_input.found is False
+    search_anchor = next(
+        item for item in profile.anchor_diagnostics if item.name == "search_input"
+    )
+    hidden_candidate = next(
+        item for item in search_anchor.candidates if item.query == SEARCH_INPUT_LOCATORS[2].query
+    )
+    assert hidden_candidate.count == 1
+    assert hidden_candidate.visible_count == 0
+    assert hidden_candidate.matched is False
+    assert profile_path.exists()
+
+
+def test_calibration_uses_visible_child_of_zero_sized_asset_landmark(
+    tmp_path: Path,
+) -> None:
+    semantic_panel_selector = next(
+        item.query
+        for item in ASSET_PANEL_LOCATORS
+        if "Icons and templates" in item.query
+    )
+    page = FakePage(
+        selector_map={
+            EDITOR_CHROME_LOCATORS[3].query: [
+                FakeElement(bbox={"x": 0, "y": 40, "width": 1440, "height": 48})
+            ],
+            "aside": [
+                FakeElement(
+                    bbox={"x": 0, "y": 0, "width": 0, "height": 0},
+                    visible=False,
+                )
+            ],
+            semantic_panel_selector: [
+                FakeElement(bbox={"x": 60, "y": 96, "width": 336, "height": 843})
+            ],
+            CANVAS_LOCATORS[1].query: [
+                FakeElement(bbox={"x": 416, "y": 213, "width": 824, "height": 578})
+            ],
+            INTERACTIVE_SELECTOR: [],
+            MODAL_SELECTOR: [],
+            "input[type='password']": [],
+        }
+    )
+
+    profile, _ = BioRenderUiCalibrator(page, output_dir=tmp_path).calibrate()
+
+    asset_anchor = next(
+        item for item in profile.anchor_diagnostics if item.name == "asset_panel"
+    )
+    assert asset_anchor.matched is True
+    assert asset_anchor.selected_locator is not None
+    assert asset_anchor.selected_locator.query == semantic_panel_selector
+
+
+def test_calibration_failure_reports_exact_missing_anchor(tmp_path: Path) -> None:
+    page = FakePage(
+        selector_map={
+            EDITOR_CHROME_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 0, "width": 1440, "height": 1000})
+            ],
+            ASSET_PANEL_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 40, "width": 300, "height": 960})
+            ],
+            INTERACTIVE_SELECTOR: [],
+            MODAL_SELECTOR: [],
+            "input[type='password']": [],
+        }
+    )
+
+    with pytest.raises(CalibrationFailed) as captured:
+        BioRenderUiCalibrator(page, output_dir=tmp_path).calibrate()
+
+    assert captured.value.missing_anchors == ["canvas"]
+    payload = json.loads(Path(captured.value.profile_path).read_text(encoding="utf-8"))
+    assert payload["missing_anchors"] == ["canvas"]
+    canvas = next(item for item in payload["anchor_diagnostics"] if item["name"] == "canvas")
+    assert canvas["matched"] is False
+    assert all(item["visible_count"] == 0 for item in canvas["candidates"])
+
+
 def test_dry_run_does_not_observe_or_modify_live_ui(tmp_path: Path) -> None:
     action = GuiAction(
         id="action_dry_run_probe",
@@ -295,7 +475,10 @@ def test_dry_run_does_not_observe_or_modify_live_ui(tmp_path: Path) -> None:
         expected_bbox=viewport_bbox(100, 100, 50, 50),
     )
     result = DryRunOperator(evidence_dir=tmp_path).execute(action)
-    assert result.status == ActionStatus.SUCCEEDED
+    assert result.status == ActionStatus.SIMULATED
+    assert result.metadata["simulation_status"] == "simulated"
+    assert result.metadata["policy_status"] == "policy_allowed"
+    assert result.metadata["live_execution_status"] == "planned"
     assert result.observed_bbox is None
     assert result.metadata["mode"] == "dry-run"
 
