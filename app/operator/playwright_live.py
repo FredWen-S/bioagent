@@ -16,9 +16,11 @@ from app.operator.biorender.calibration import BioRenderUiCalibrator
 from app.operator.biorender.drag import SafeAssetDrag
 from app.operator.biorender.locators import (
     ALIGN_TOOL_LOCATORS,
+    ASSET_PANEL_LOCATORS,
     CANVAS_LOCATORS,
     CONNECTOR_TOOL_LOCATORS,
     DISTRIBUTE_TOOL_LOCATORS,
+    EDITOR_CHROME_LOCATORS,
     GROUP_TOOL_LOCATORS,
     RESIZE_HANDLE_LOCATORS,
     ROTATE_HANDLE_LOCATORS,
@@ -190,12 +192,20 @@ class LivePlaywrightOperator:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = sync_playwright().start()
-        self._context = self._playwright.chromium.launch_persistent_context(
-            str(self.profile_dir),
-            headless=not self.headed,
-            viewport={"width": 1440, "height": 1000},
-        )
-        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        try:
+            self._context = self._playwright.chromium.launch_persistent_context(
+                str(self.profile_dir),
+                headless=not self.headed,
+                viewport={"width": 1440, "height": 1000},
+            )
+            self._page = (
+                self._context.pages[0]
+                if self._context.pages
+                else self._context.new_page()
+            )
+        except BaseException:
+            self.close()
+            raise
 
     def execute(self, action: GuiAction, attempt: int = 1) -> GuiActionResult:
         self.policy.check(action)
@@ -600,6 +610,11 @@ class LivePlaywrightOperator:
             requested_url=requested_url,
             timeout_seconds=timeout_seconds,
         )
+        remaining_seconds = max(
+            0.0,
+            timeout_seconds - float(wait_summary["wait_elapsed_seconds"]),
+        )
+        self._wait_for_structural_anchors(remaining_seconds)
 
         profile, profile_path = BioRenderUiCalibrator(
             page,
@@ -626,6 +641,19 @@ class LivePlaywrightOperator:
                 "editor_ready_wait": wait_summary,
             },
         )
+
+    def _wait_for_structural_anchors(self, timeout_seconds: float) -> None:
+        """Use the remaining editor-ready budget for the full anchor combination."""
+        deadline = float(self._clock()) + max(0.0, timeout_seconds)
+        while True:
+            editor = resolve_largest_visible(self._page, EDITOR_CHROME_LOCATORS)
+            asset_panel = resolve_largest_visible(self._page, ASSET_PANEL_LOCATORS)
+            canvas = self._canvas_locator()
+            if editor is not None and asset_panel is not None and canvas is not None:
+                return
+            if float(self._clock()) >= deadline:
+                return
+            self._sleep(self._editor_ready_poll_interval_seconds)
 
     def _wait_for_editor_ready(
         self,
@@ -3033,14 +3061,17 @@ class LivePlaywrightOperator:
         return path
 
     def close(self) -> None:
-        if self._context is not None:
-            self._context.close()
-        if self._playwright is not None:
-            self._playwright.stop()
+        context, playwright = self._context, self._playwright
         self._context = None
         self._playwright = None
         self._page = None
         self._current_figure_id = None
+        try:
+            if context is not None:
+                context.close()
+        finally:
+            if playwright is not None:
+                playwright.stop()
 
     @property
     def page(self) -> Any:

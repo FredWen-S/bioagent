@@ -38,6 +38,34 @@ SEARCH_RESULTS_LOCATORS = (
     LocatorSpec("css", "[data-testid*='library-panel']", confidence=0.72),
 )
 
+EDITOR_CHROME_LOCATORS = (
+    LocatorSpec("css", "[data-testid*='editor-root']", confidence=0.98),
+    LocatorSpec("css", "[data-testid*='illustration-editor']", confidence=0.97),
+    LocatorSpec("css", "[aria-label*='illustration editor' i]", confidence=0.94),
+    LocatorSpec("css", "[role='toolbar']", confidence=0.9),
+    LocatorSpec("css", "main", confidence=0.72),
+)
+
+ASSET_PANEL_LOCATORS = (
+    LocatorSpec("css", "[data-testid*='asset-panel']", confidence=0.98),
+    LocatorSpec("css", "[data-testid*='library-panel']", confidence=0.97),
+    LocatorSpec(
+        "css",
+        "[aria-label='Icons and templates' i] .workbench-block",
+        confidence=0.96,
+    ),
+    LocatorSpec(
+        "css",
+        "[aria-label*='图标'][aria-label*='模板'] .workbench-block",
+        confidence=0.95,
+    ),
+    LocatorSpec("css", "[data-testid*='library']", confidence=0.92),
+    LocatorSpec("css", "[aria-label*='asset' i]", confidence=0.9),
+    LocatorSpec("css", "[aria-label*='library' i]", confidence=0.88),
+    LocatorSpec("css", "aside", confidence=0.8),
+    LocatorSpec("css", "[role='complementary']", confidence=0.78),
+)
+
 CANVAS_LOCATORS = (
     LocatorSpec("css", "[data-testid*='canvas-container']", confidence=0.97),
     LocatorSpec("css", "[data-testid*='canvas']", confidence=0.92),
@@ -172,17 +200,20 @@ MODAL_SELECTOR = "[role='dialog'], [aria-modal='true'], [class*='modal']"
 INTERACTIVE_SELECTOR = "button, a, [role='button'], [role='menuitem']"
 
 
+def locator_for_spec(page: Any, spec: LocatorSpec) -> Any:
+    if spec.strategy == "role":
+        return page.get_by_role(spec.role, name=re.compile(spec.query, re.IGNORECASE))
+    if spec.strategy == "label":
+        return page.get_by_label(re.compile(spec.query, re.IGNORECASE))
+    if spec.strategy == "text":
+        return page.get_by_text(re.compile(spec.query, re.IGNORECASE))
+    return page.locator(spec.query)
+
+
 def resolve_first_visible(page: Any, specs: tuple[LocatorSpec, ...]) -> ResolvedLocator | None:
     for spec in specs:
         try:
-            if spec.strategy == "role":
-                locator = page.get_by_role(spec.role, name=re.compile(spec.query, re.IGNORECASE))
-            elif spec.strategy == "label":
-                locator = page.get_by_label(re.compile(spec.query, re.IGNORECASE))
-            elif spec.strategy == "text":
-                locator = page.get_by_text(re.compile(spec.query, re.IGNORECASE))
-            else:
-                locator = page.locator(spec.query)
+            locator = locator_for_spec(page, spec)
             count = min(locator.count(), 50)
             for index in range(count):
                 candidate = locator.nth(index)
@@ -204,14 +235,7 @@ def resolve_largest_visible(page: Any, specs: tuple[LocatorSpec, ...]) -> Resolv
     best: tuple[float, ResolvedLocator] | None = None
     for spec in specs:
         try:
-            if spec.strategy == "role":
-                locator = page.get_by_role(spec.role, name=re.compile(spec.query, re.IGNORECASE))
-            elif spec.strategy == "label":
-                locator = page.get_by_label(re.compile(spec.query, re.IGNORECASE))
-            elif spec.strategy == "text":
-                locator = page.get_by_text(re.compile(spec.query, re.IGNORECASE))
-            else:
-                locator = page.locator(spec.query)
+            locator = locator_for_spec(page, spec)
             count = min(locator.count(), 50)
             for index in range(count):
                 candidate = locator.nth(index)

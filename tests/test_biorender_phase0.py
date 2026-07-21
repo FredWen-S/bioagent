@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 from pathlib import Path
 
@@ -10,10 +11,13 @@ from PIL import Image, ImageDraw
 from app.cli import cmd_calibrate_ui, cmd_live_search_asset, cmd_phase0_search_drag
 from app.operator.biorender.calibration import BioRenderUiCalibrator
 from app.operator.biorender.locators import (
+    ASSET_PANEL_LOCATORS,
     CANDIDATE_SELECTORS,
     CANVAS_LOCATORS,
+    EDITOR_CHROME_LOCATORS,
     INTERACTIVE_SELECTOR,
     MODAL_SELECTOR,
+    SEARCH_INPUT_LOCATORS,
     SEARCH_RESULTS_LOCATORS,
 )
 from app.operator.biorender.observer import PixelDiffInsertionObserver
@@ -283,6 +287,116 @@ def test_calibration_missing_search_input_saves_evidence_then_fails(tmp_path: Pa
         BioRenderUiCalibrator(page, output_dir=tmp_path).calibrate()
     assert captured.value.profile_path is not None
     assert Path(captured.value.profile_path).exists()
+
+
+def test_calibration_accepts_structural_anchors_with_hidden_optional_controls(
+    tmp_path: Path,
+) -> None:
+    hidden_search = FakeElement(
+        bbox={"x": 10, "y": 20, "width": 250, "height": 36},
+        visible=False,
+    )
+    page = FakePage(
+        selector_map={
+            EDITOR_CHROME_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 0, "width": 1440, "height": 1000})
+            ],
+            ASSET_PANEL_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 40, "width": 300, "height": 960})
+            ],
+            CANVAS_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 320, "y": 80, "width": 1000, "height": 700})
+            ],
+            SEARCH_INPUT_LOCATORS[2].query: [hidden_search],
+            INTERACTIVE_SELECTOR: [],
+            MODAL_SELECTOR: [],
+            "input[type='password']": [],
+        }
+    )
+
+    profile, profile_path = BioRenderUiCalibrator(page, output_dir=tmp_path).calibrate()
+
+    assert profile.editor_loaded is True
+    assert profile.url == "https://app.biorender.com/<redacted>"
+    assert profile.missing_anchors == []
+    assert profile.search_input.found is False
+    search_anchor = next(
+        item for item in profile.anchor_diagnostics if item.name == "search_input"
+    )
+    hidden_candidate = next(
+        item for item in search_anchor.candidates if item.query == SEARCH_INPUT_LOCATORS[2].query
+    )
+    assert hidden_candidate.count == 1
+    assert hidden_candidate.visible_count == 0
+    assert hidden_candidate.matched is False
+    assert profile_path.exists()
+
+
+def test_calibration_uses_visible_child_of_zero_sized_asset_landmark(
+    tmp_path: Path,
+) -> None:
+    semantic_panel_selector = next(
+        item.query
+        for item in ASSET_PANEL_LOCATORS
+        if "Icons and templates" in item.query
+    )
+    page = FakePage(
+        selector_map={
+            EDITOR_CHROME_LOCATORS[3].query: [
+                FakeElement(bbox={"x": 0, "y": 40, "width": 1440, "height": 48})
+            ],
+            "aside": [
+                FakeElement(
+                    bbox={"x": 0, "y": 0, "width": 0, "height": 0},
+                    visible=False,
+                )
+            ],
+            semantic_panel_selector: [
+                FakeElement(bbox={"x": 60, "y": 96, "width": 336, "height": 843})
+            ],
+            CANVAS_LOCATORS[1].query: [
+                FakeElement(bbox={"x": 416, "y": 213, "width": 824, "height": 578})
+            ],
+            INTERACTIVE_SELECTOR: [],
+            MODAL_SELECTOR: [],
+            "input[type='password']": [],
+        }
+    )
+
+    profile, _ = BioRenderUiCalibrator(page, output_dir=tmp_path).calibrate()
+
+    asset_anchor = next(
+        item for item in profile.anchor_diagnostics if item.name == "asset_panel"
+    )
+    assert asset_anchor.matched is True
+    assert asset_anchor.selected_locator is not None
+    assert asset_anchor.selected_locator.query == semantic_panel_selector
+
+
+def test_calibration_failure_reports_exact_missing_anchor(tmp_path: Path) -> None:
+    page = FakePage(
+        selector_map={
+            EDITOR_CHROME_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 0, "width": 1440, "height": 1000})
+            ],
+            ASSET_PANEL_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 40, "width": 300, "height": 960})
+            ],
+            INTERACTIVE_SELECTOR: [],
+            MODAL_SELECTOR: [],
+            "input[type='password']": [],
+        }
+    )
+
+    with pytest.raises(CalibrationFailed) as captured:
+        BioRenderUiCalibrator(page, output_dir=tmp_path).calibrate()
+
+    assert captured.value.missing_anchors == ["canvas"]
+    payload = json.loads(Path(captured.value.profile_path).read_text(encoding="utf-8"))
+    assert payload["missing_anchors"] == ["canvas"]
+    canvas = next(item for item in payload["anchor_diagnostics"] if item["name"] == "canvas")
+    assert canvas["matched"] is False
+    assert all(item["visible_count"] == 0 for item in canvas["candidates"])
 
 
 def test_dry_run_does_not_observe_or_modify_live_ui(tmp_path: Path) -> None:

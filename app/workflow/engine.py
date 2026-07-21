@@ -4,7 +4,13 @@ from collections.abc import Callable
 
 from app.operator.action_planner import GuiActionPlanner
 from app.operator.base import GuiOperator
-from app.operator.errors import AuthenticationRequired, OperatorError, PolicyBlocked
+from app.operator.errors import (
+    AuthenticationRequired,
+    CalibrationFailed,
+    EditorPrepareFailed,
+    OperatorError,
+    PolicyBlocked,
+)
 from app.operator.safety import ActionSafetyPolicy, UnsafeActionError
 from app.planner.asset_search_planner import AssetSearchPlanner
 from app.planner.figure_planner import ScientificFigurePlanner
@@ -294,6 +300,27 @@ class WorkflowEngine:
                         )
                     except OperatorError as error:
                         screenshot_path = error.screenshot_path
+                        failure_metadata: dict[str, object] = {
+                            "mode": "live",
+                            "evidence_kind": "failure",
+                        }
+                        if isinstance(error, EditorPrepareFailed):
+                            failure_metadata["editor_prepare_failure"] = {
+                                "error_type": error.error_type,
+                                "subcode": error.subcode,
+                                **error.metadata,
+                                "screenshot_path": screenshot_path
+                                or error.metadata.get("screenshot_path"),
+                            }
+                            failure_metadata["safe_to_retry"] = False
+                        elif isinstance(error, CalibrationFailed):
+                            failure_metadata["ui_calibration_failure"] = {
+                                "error_type": error.error_type,
+                                "profile_path": error.profile_path,
+                                "missing_anchors": error.missing_anchors,
+                                "anchor_diagnostics": error.anchor_diagnostics,
+                            }
+                            failure_metadata["safe_to_retry"] = False
                         last_result = GuiActionResult(
                             action_id=action.id,
                             status=ActionStatus.FAILED,
@@ -307,7 +334,7 @@ class WorkflowEngine:
                             ]
                             if screenshot_path
                             else [],
-                            metadata={"mode": "live", "evidence_kind": "failure"},
+                            metadata=failure_metadata,
                         )
                     except Exception as error:  # preserve evidence and stop safely
                         last_result = GuiActionResult(

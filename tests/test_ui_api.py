@@ -9,6 +9,8 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from app.api.ui_routes import create_ui_router
+from app.operator.errors import CalibrationFailed
+from app.schemas.figure_spec import FigureStatus
 from app.schemas.ui import UiTaskInput
 from app.services.figure_execution_service import FigureExecutionService, UiServiceError
 from app.storage.database import FigureDatabase
@@ -95,30 +97,69 @@ def test_status_and_presets_are_user_safe(client: TestClient) -> None:
     ]
 
 
-def test_dry_run_uses_existing_workflow(client: TestClient) -> None:
+def test_dry_run_requires_an_existing_plan(client: TestClient) -> None:
     response = client.post("/api/ui/dry-run", json={"task": _preset_task()})
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["status"] == "awaiting_confirmation"
-    assert payload["total_actions"] > 0
-    assert payload["real_biorender_accepted"] is False
+    assert response.status_code == 422
 
 
-def test_limited_custom_figure_can_be_planned(client: TestClient) -> None:
+def test_plan_endpoint_enforces_login_and_canvas_gate(client: TestClient) -> None:
     response = client.post("/api/ui/plans", json={"task": _custom_task()})
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["scientific_validation_passed"] is True
-    assert payload["total_elements"] >= 5
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "LOGIN_REQUIRED"
 
 
-def test_multiple_runs_use_distinct_persisted_action_ids(client: TestClient) -> None:
-    first = client.post("/api/ui/plans", json={"task": _preset_task()})
-    second = client.post("/api/ui/plans", json={"task": _preset_task()})
+def test_multiple_plans_use_distinct_persisted_action_ids(
+    ui_service: FigureExecutionService,
+) -> None:
+    task = UiTaskInput.model_validate(_preset_task())
+    first = ui_service.plan_task(task)
+    second = ui_service.plan_task(task)
 
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert first.json()["run_id"] != second.json()["run_id"]
+    assert first.figure_spec.id != second.figure_spec.id
+
+
+def test_run_summary_exposes_wizard_lineage_and_resume_fields(
+    ui_service: FigureExecutionService,
+) -> None:
+    bundle = ui_service.plan_task(UiTaskInput.model_validate(_preset_task()))
+    payload = ui_service.run_summary(bundle.figure_spec.id)
+
+    assert {
+        "source_dry_run_id",
+        "source_plan_id",
+        "dry_run_gate",
+        "prepare_failure",
+        "resume_blocked_reason",
+        "task_fingerprint",
+    } <= payload.keys()
+
+
+def test_calibration_failure_is_not_resumable(
+    ui_service: FigureExecutionService,
+) -> None:
+    class CalibrationFailureOperator:
+        def execute(self, _action, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise CalibrationFailed(
+                "missing required UI anchor: asset_panel",
+                profile_path="runtime/calibration/profile.json",
+                missing_anchors=["asset_panel"],
+            )
+
+        def close(self) -> None:
+            return None
+
+    bundle = ui_service.plan_task(UiTaskInput.model_validate(_preset_task()))
+    status = ui_service.engine.execute(
+        bundle.figure_spec.id,
+        CalibrationFailureOperator(),
+    )
+    payload = ui_service.run_summary(bundle.figure_spec.id)
+
+    assert status == FigureStatus.FAILED
+    assert payload["can_resume"] is False
+    assert payload["resume_blocked_reason"]
+    assert payload["prepare_failure"]["subcode"] == "ui_calibration_failed"
+    assert payload["prepare_failure"]["missing_anchors"] == ["asset_panel"]
 
 
 @pytest.mark.parametrize(
@@ -149,6 +190,7 @@ def test_live_run_requires_both_confirmations(client: TestClient) -> None:
         json={
             "editor_url": "https://app.biorender.com/figure/disposable",
             "task": _preset_task(),
+            "dry_run_id": "figure_confirmed_dry_run",
             "confirmed_disposable": False,
             "confirm_live": True,
             "enable_biorender_ai": False,
@@ -156,6 +198,23 @@ def test_live_run_requires_both_confirmations(client: TestClient) -> None:
     )
     assert response.status_code == 409
     assert response.json()["error_code"] == "LIVE_CONFIRMATION_REQUIRED"
+
+
+def test_live_run_rejects_plan_only_without_dry_run_id(client: TestClient) -> None:
+    response = client.post(
+        "/api/ui/live-runs",
+        json={
+            "editor_url": "https://app.biorender.com/figure/disposable",
+            "task": _preset_task(),
+            "plan_id": "figure_parsed_plan",
+            "confirmed_disposable": True,
+            "confirm_live": True,
+            "enable_biorender_ai": False,
+        },
+    )
+
+    assert 400 <= response.status_code < 500
+    assert response.status_code == 422
 
 
 def test_frontend_cannot_enable_biorender_ai(client: TestClient) -> None:

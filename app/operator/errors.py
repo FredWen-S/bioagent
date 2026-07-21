@@ -73,9 +73,18 @@ class UnsupportedLiveAction(OperatorError):
 class CalibrationFailed(OperatorError):
     error_type = "ui_calibration_failed"
 
-    def __init__(self, message: str, *, profile_path: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        profile_path: str | None = None,
+        missing_anchors: list[str] | None = None,
+        anchor_diagnostics: list[dict[str, Any]] | None = None,
+    ) -> None:
         super().__init__(message)
         self.profile_path = profile_path
+        self.missing_anchors = list(missing_anchors or [])
+        self.anchor_diagnostics = list(anchor_diagnostics or [])
 
 
 class PolicyBlocked(OperatorError):
