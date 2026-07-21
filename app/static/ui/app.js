@@ -9,6 +9,9 @@ const stateLabels = {
   canvas_validating: "正在检查画布",
   prompt_required: "需要绘图需求",
   prompt_parsed: "需求已解析",
+  dry_run_confirmation_required: "预演待确认",
+  dry_run_failed: "预演失败",
+  dry_run_stale: "预演已失效",
   ready_to_execute: "可以开始执行",
   executing: "正在执行",
   stop_requested: "正在安全停止",
@@ -46,9 +49,13 @@ const state = {
   blankCanvasConfirmed: false,
   canvasVerified: false,
   planId: null,
+  taskFingerprint: null,
   planFingerprint: null,
+  planCanvasUrl: null,
   dryRunId: null,
   dryRunFingerprint: null,
+  dryRunSummary: null,
+  dryRunStaleReason: null,
   runId: null,
   currentJobId: null,
   currentJobStatus: null,
@@ -110,9 +117,12 @@ function saveState() {
     blankCanvasConfirmed: state.blankCanvasConfirmed,
     canvasVerified: state.canvasVerified,
     planId: state.planId,
+    taskFingerprint: state.taskFingerprint,
     planFingerprint: state.planFingerprint,
+    planCanvasUrl: state.planCanvasUrl,
     dryRunId: state.dryRunId,
     dryRunFingerprint: state.dryRunFingerprint,
+    dryRunStaleReason: state.dryRunStaleReason,
     runId: state.runId,
     currentJobId: state.currentJobId
   }));
@@ -169,6 +179,22 @@ function reconcileWorkflowStep(workflow) {
 
 function renderWorkflow(workflow) {
   if (!workflow) return;
+  if (
+    state.workflow?.dry_run_completed === true
+    && state.dryRunId
+    && workflow.state === "prompt_parsed"
+    && workflow.dry_run_completed !== true
+  ) {
+    return;
+  }
+  if (workflow.dry_run_id) {
+    state.dryRunId = workflow.dry_run_id;
+    state.dryRunFingerprint = workflow.plan_fingerprint || state.dryRunFingerprint;
+    state.taskFingerprint = state.taskFingerprint || workflow.task_fingerprint || null;
+    state.planFingerprint = state.planFingerprint || workflow.plan_fingerprint || null;
+    if (state.runId === workflow.dry_run_id) state.runId = null;
+  }
+  if (workflow.dry_run_summary) renderDryRunSummary(workflow.dry_run_summary);
   state.workflow = workflow;
   const reconciledStep = reconcileWorkflowStep(workflow);
   if (reconciledStep !== state.step) {
@@ -196,6 +222,7 @@ function renderWorkflow(workflow) {
   setStatusBadge("execution-state", stateLabels[workflow.state] || "未开始");
   if (workflow.state === "completed" || workflow.state === "completed_with_unknown") setStatusBadge("result-state", stateLabels[workflow.state]);
   updateControls();
+  saveState();
 }
 
 function renderPromptGuidance(workflow) {
@@ -215,6 +242,9 @@ function renderPromptPhases(workflow) {
   const currentIndex = {
     prompt_required: 0,
     prompt_parsed: 2,
+    dry_run_confirmation_required: 3,
+    dry_run_stale: 3,
+    dry_run_failed: 3,
     ready_to_execute: 5
   }[workflow.state];
   if (currentIndex === undefined) return;
@@ -242,15 +272,20 @@ function buildTask() {
   return { mode: "preset", preset_id: "pd1", prompt: null, custom: null };
 }
 
-function invalidatePlan() {
+function invalidatePlan(reason = null) {
+  if (reason && (state.planId || state.dryRunId)) state.dryRunStaleReason = reason;
   state.planId = null;
+  state.taskFingerprint = null;
   state.planFingerprint = null;
+  state.planCanvasUrl = null;
   state.planSummary = null;
   // The plan changed, so any previously confirmed dry_run no longer applies
   // to what will run next. Drop it to prevent DRY_RUN_TASK_MISMATCH after
   // the user tweaks the prompt.
   state.dryRunId = null;
   state.dryRunFingerprint = null;
+  state.dryRunSummary = null;
+  byId("dry-run-review").hidden = true;
   byId("plan-summary").hidden = true;
   setText("prompt-guidance", "请先解析绘图需求。");
   renderPromptPhases({ state: "prompt_required" });
@@ -261,7 +296,10 @@ function invalidatePlan() {
 
 function renderPlan(plan) {
   state.planId = plan.run_id;
-  state.planFingerprint = plan.task_fingerprint || null;
+  state.taskFingerprint = plan.task_fingerprint || null;
+  state.planFingerprint = plan.plan_fingerprint || plan.task_fingerprint || null;
+  state.planCanvasUrl = state.canvasUrl;
+  state.dryRunStaleReason = null;
   state.planSummary = plan.task_summary || null;
   const summary = plan.task_summary || {};
   byId("plan-summary").hidden = false;
@@ -277,6 +315,65 @@ function renderPlan(plan) {
     : "需求已解析。查看任务摘要后即可进入执行步骤。");
   saveState();
   updateControls();
+}
+
+function renderList(id, items, emptyText = "无") {
+  const list = byId(id);
+  const values = Array.isArray(items) ? items : [];
+  const nodes = values.map((value) => Object.assign(document.createElement("li"), { textContent: String(value) }));
+  list.replaceChildren(...(nodes.length ? nodes : [Object.assign(document.createElement("li"), { textContent: emptyText })]));
+}
+
+function renderDryRunSummary(summary) {
+  if (!summary) return;
+  state.dryRunSummary = summary;
+  state.dryRunStaleReason = null;
+  byId("dry-run-review").hidden = false;
+  const canvas = summary.target_canvas || {};
+  const task = summary.task || {};
+  const planned = summary.planned_actions || {};
+  const result = summary.result || {};
+  const evidence = summary.evidence || {};
+  setText("dry-canvas-url", canvas.redacted_url || canvas.figure_identifier || "未提供脱敏 URL");
+  setText("dry-canvas-confirmed", canvas.confirmed_test_canvas ? "是，已确认测试画布" : "否，需重新检查画布");
+  setText("dry-title", task.figure_title || "-");
+  setText("dry-assets", task.asset_count || 0);
+  setText("dry-labels", task.label_count || 0);
+  setText("dry-connections", task.connection_count || 0);
+  setText("dry-total-actions", task.total_action_count || 0);
+  renderList("dry-searches", planned.search_assets, "不搜索素材");
+  renderList("dry-inserts", planned.insert_assets, "不插入素材");
+  renderList("dry-label-actions", planned.add_labels, "不添加标签");
+  renderList("dry-connection-actions", planned.add_connections, "不添加连接");
+  setText("dry-layout", planned.adjust_layout ? "会按计划调整布局" : "不调整布局");
+  setText("dry-policy", result.policy_check_passed ? "通过" : "未通过");
+  setText("dry-blocked", result.blocked_action_count || 0);
+  setText("dry-warnings", result.warning_count || 0);
+  renderList("dry-review-items", result.manual_review_items, "无额外人工复核项");
+  setText("dry-live-ready", result.can_enter_live_run ? "可以进入 Live Run" : "不能进入 Live Run");
+  setText("dry-screenshot-note", evidence.screenshot_note || "安全预演不产生真实画布截图。");
+  const audit = evidence.audit_event;
+  setText("dry-audit", audit ? `${audit.event_type} · ${new Date(audit.created_at).toLocaleString()}` : "未找到 dry-run 审计事件");
+  const rows = (summary.dry_run_actions || []).map((item) => {
+    const row = document.createElement("tr");
+    row.append(
+      Object.assign(document.createElement("td"), { textContent: String(item.sequence) }),
+      Object.assign(document.createElement("td"), { textContent: actionLabels[item.action_type] || item.action_type }),
+      Object.assign(document.createElement("td"), { textContent: item.status }),
+      Object.assign(document.createElement("td"), { textContent: item.blocked ? "已阻止" : item.risk_level })
+    );
+    return row;
+  });
+  byId("dry-action-body").replaceChildren(...rows);
+  const logItems = (evidence.recent_logs || []).map((entry) => {
+    const item = document.createElement("li");
+    item.textContent = `${actionLabels[entry.action_type] || entry.action_type}：${entry.status}`;
+    return item;
+  });
+  byId("recent-logs").replaceChildren(...(logItems.length ? logItems : [Object.assign(document.createElement("li"), { textContent: "预演未生成动作日志。" })]));
+  byId("execution-evidence").replaceChildren(Object.assign(document.createElement("span"), { textContent: evidence.screenshot_note || "安全预演不产生真实画布截图。" }));
+  byId("advanced-details").textContent = JSON.stringify(summary, null, 2);
+  saveState();
 }
 
 function renderElements(items) {
@@ -493,7 +590,8 @@ async function pollJob() {
 async function refreshWorkflow() {
   const query = new URLSearchParams();
   if (state.planId) query.set("plan_id", state.planId);
-  if (state.runId) query.set("run_id", state.runId);
+  if (state.dryRunId) query.set("dry_run_id", state.dryRunId);
+  if (state.runId && state.runId !== state.dryRunId) query.set("run_id", state.runId);
   try {
     const workflow = await api(`/api/ui/workflow-state?${query.toString()}`);
     renderWorkflow(workflow);
@@ -644,11 +742,22 @@ async function runDryRun() {
       method: "POST",
       body: JSON.stringify({ plan_id: state.planId, task: buildTask() })
     });
-    state.dryRunId = summary.run_id;
-    state.dryRunFingerprint = state.planFingerprint;
+    if (!summary.dry_run_id) throw new Error("安全预演响应缺少 dry_run_id，不能确认。");
+    state.dryRunId = summary.dry_run_id;
+    state.dryRunFingerprint = summary.plan_fingerprint || state.planFingerprint;
+    state.taskFingerprint = summary.task_fingerprint || state.taskFingerprint;
+    state.planFingerprint = summary.plan_fingerprint || state.planFingerprint;
+    state.dryRunStaleReason = null;
+    if (summary.summary) renderDryRunSummary(summary.summary);
     saveState();
     await refreshWorkflow();
-    showToast("安全预演完成，请确认后再开始真实执行。");
+    if (summary.dry_run_failed || summary.status === "failed") {
+      showToast("安全预演失败，请查看结果后修正并重新预演。", true);
+    } else if (summary.dry_run_completed && summary.can_confirm_dry_run) {
+      showToast("安全预演完成，请查看内容并确认后再开始真实执行。");
+    } else {
+      showToast("安全预演未进入可确认状态，请查看阻塞原因。", true);
+    }
   } catch (error) {
     showToast(error.message, true);
   } finally { setBusy(false); }
@@ -658,9 +767,17 @@ async function confirmDryRun() {
   if (state.busy || !state.dryRunId) return;
   setBusy(true);
   try {
-    await api(`/api/ui/runs/${encodeURIComponent(state.dryRunId)}/confirm-dry-run`, {
-      method: "POST", body: "{}"
+    const confirmed = await api(`/api/ui/runs/${encodeURIComponent(state.dryRunId)}/confirm-dry-run`, {
+      method: "POST",
+      body: JSON.stringify({
+        task_fingerprint: state.taskFingerprint,
+        plan_fingerprint: state.dryRunFingerprint,
+        source_plan_id: state.planId,
+        editor_url: state.canvasUrl
+      })
     });
+    state.dryRunFingerprint = confirmed.plan_fingerprint || state.dryRunFingerprint;
+    if (confirmed.summary) renderDryRunSummary(confirmed.summary);
     await refreshWorkflow();
     showToast("安全预演已确认，可以开始真实执行。");
   } catch (error) {
@@ -723,9 +840,13 @@ async function newTask() {
   state.blankCanvasConfirmed = false;
   state.canvasVerified = false;
   state.planId = null;
+  state.taskFingerprint = null;
   state.planFingerprint = null;
+  state.planCanvasUrl = null;
   state.dryRunId = null;
   state.dryRunFingerprint = null;
+  state.dryRunSummary = null;
+  state.dryRunStaleReason = null;
   state.runId = null;
   state.currentJobId = null;
   state.summary = null;
@@ -748,7 +869,38 @@ function updateControls() {
   byId("check-canvas").disabled = state.busy || workflowState !== "canvas_required" || !state.canvasUrl || !state.blankCanvasConfirmed;
   byId("parse-prompt").disabled = state.busy || backendButtons.parse_prompt !== true || !hasPrompt;
   byId("run-dry-run").disabled = state.busy || backendButtons.run_dry_run !== true || !state.planId;
-  byId("confirm-dry-run").disabled = state.busy || backendButtons.confirm_dry_run !== true || !state.dryRunId;
+  const workflow = state.workflow || {};
+  const promptMatches = Boolean(state.taskFingerprint) && workflow.task_fingerprint === state.taskFingerprint;
+  const planMatches = Boolean(state.planFingerprint)
+    && workflow.plan_fingerprint === state.planFingerprint
+    && state.dryRunFingerprint === state.planFingerprint;
+  const canvasMatches = Boolean(state.planCanvasUrl) && state.canvasUrl === state.planCanvasUrl && state.canvasVerified;
+  const summaryLoaded = Boolean(state.dryRunSummary);
+  const canConfirm = !state.busy
+    && Boolean(state.dryRunId)
+    && workflow.dry_run_completed === true
+    && workflow.dry_run_failed !== true
+    && workflow.dry_run_confirmed === false
+    && workflow.can_confirm_dry_run === true
+    && promptMatches
+    && planMatches
+    && canvasMatches
+    && summaryLoaded
+    && !state.dryRunStaleReason;
+  byId("confirm-dry-run").disabled = !canConfirm;
+  let confirmReason = "预演结果已加载，可以确认。";
+  if (state.busy) confirmReason = "预演结果仍在加载。";
+  else if (state.dryRunStaleReason) confirmReason = state.dryRunStaleReason;
+  else if (workflow.dry_run_failed) confirmReason = "预演失败，不能确认。";
+  else if (!state.dryRunId) confirmReason = "找不到 dry_run_id；请重新执行安全预演。";
+  else if (!workflow.dry_run_completed) confirmReason = "尚未完成安全预演。";
+  else if (workflow.dry_run_confirmed) confirmReason = "预演结果已确认。";
+  else if (!summaryLoaded) confirmReason = "预演摘要仍在加载，暂不能确认。";
+  else if (!promptMatches) confirmReason = "当前 Prompt 已修改，请重新预演。";
+  else if (!canvasMatches) confirmReason = "当前画布已变化，请重新预演。";
+  else if (!planMatches) confirmReason = "当前计划与预演指纹不一致，请重新预演。";
+  else if (workflow.can_confirm_dry_run !== true) confirmReason = workflow.reason || "后端尚未允许确认。";
+  setText("dry-run-confirm-reason", confirmReason);
   byId("start-live").disabled = state.busy || backendButtons.start_live !== true;
   byId("resume-run").disabled = state.busy || backendButtons.resume !== true;
   byId("safe-stop").disabled = !state.currentJobId && !state.runId || !["login_checking", "canvas_validating", "executing", "stop_requested", "verifying", "paused"].includes(workflowState);
@@ -788,18 +940,20 @@ queryAll('input[name="task-mode"]').forEach((input) => input.addEventListener("c
   state.taskMode = input.value;
   byId("preset-panel").hidden = state.taskMode !== "preset";
   byId("prompt-panel").hidden = state.taskMode !== "prompt";
-  invalidatePlan();
+  invalidatePlan("任务类型已修改，请重新解析并预演。");
   updateControls();
 }));
 byId("prompt-input").addEventListener("input", () => {
   state.prompt = byId("prompt-input").value;
   byId("prompt-count").textContent = `${state.prompt.length} / 3000`;
-  if (state.planId) invalidatePlan();
+  if (state.planId || state.dryRunId) invalidatePlan("当前 Prompt 已修改，请重新预演。");
   updateControls();
 });
 byId("editor-url").addEventListener("input", () => {
+  const changedFromPlan = Boolean(state.planCanvasUrl) && byId("editor-url").value.trim() !== state.planCanvasUrl;
   state.canvasUrl = byId("editor-url").value.trim();
   state.canvasVerified = false;
+  if (changedFromPlan || state.dryRunId) invalidatePlan("当前画布已变化，请重新检查画布、解析需求并重新预演。");
   updateControls();
   saveState();
 });

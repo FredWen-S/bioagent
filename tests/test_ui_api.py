@@ -52,6 +52,22 @@ def _custom_task() -> dict[str, object]:
     }
 
 
+def _prepare_guided_dry_run(
+    service: FigureExecutionService,
+) -> tuple[UiTaskInput, dict[str, object], dict[str, object]]:
+    editor_url = "https://app.biorender.com/figure/disposable-test"
+    service._login_verified = True
+    service._verified_canvas = {
+        "editor_url": editor_url,
+        "title": "Disposable test figure",
+        "figure_identifier": "disposable-test",
+    }
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = service.inspect_plan(task)
+    dry_run = service.execute_planned_dry_run(str(plan["run_id"]), task)
+    return task, plan, dry_run
+
+
 @pytest.fixture
 def ui_service(tmp_path: Path) -> FigureExecutionService:
     return FigureExecutionService(FigureDatabase(tmp_path / "ui.sqlite3"))
@@ -100,6 +116,139 @@ def test_status_and_presets_are_user_safe(client: TestClient) -> None:
 def test_dry_run_requires_an_existing_plan(client: TestClient) -> None:
     response = client.post("/api/ui/dry-run", json={"task": _preset_task()})
     assert response.status_code == 422
+
+
+def test_completed_dry_run_has_stable_confirmable_response_and_summary(
+    ui_service: FigureExecutionService,
+) -> None:
+    _task, plan, dry_run = _prepare_guided_dry_run(ui_service)
+
+    assert dry_run["dry_run_id"] == plan["run_id"]
+    assert dry_run["status"] == "awaiting_confirmation"
+    assert dry_run["dry_run_completed"] is True
+    assert dry_run["dry_run_failed"] is False
+    assert dry_run["dry_run_confirmed"] is False
+    assert dry_run["can_confirm_dry_run"] is True
+    assert dry_run["task_fingerprint"] == plan["task_fingerprint"]
+    assert dry_run["plan_fingerprint"] == plan["plan_fingerprint"]
+    assert dry_run["source_plan_id"] == plan["run_id"]
+    summary = dry_run["summary"]
+    assert summary["target_canvas"]["confirmed_test_canvas"] is True
+    assert summary["task"]["figure_title"]
+    assert summary["task"]["total_action_count"] > 0
+    assert summary["planned_actions"]["search_assets"]
+    assert summary["planned_actions"]["insert_assets"]
+    assert summary["planned_actions"]["add_labels"]
+    assert summary["planned_actions"]["add_connections"]
+    assert summary["safety_limits"] == {
+        "biorender_ai_generate": "forbidden",
+        "export": "forbidden",
+        "share": "forbidden",
+        "purchase": "forbidden",
+        "other_figures": "not_modified",
+        "real_biorender_modified": False,
+    }
+    assert summary["result"]["policy_check_passed"] is True
+    assert summary["evidence"]["audit_event"]["event_type"] == "dry_run_completed"
+    assert "不产生真实画布截图" in summary["evidence"]["screenshot_note"]
+    assert summary["dry_run_actions"]
+
+
+def test_workflow_recovers_dry_run_from_plan_id_without_local_dry_run_id(
+    ui_service: FigureExecutionService,
+) -> None:
+    _task, plan, dry_run = _prepare_guided_dry_run(ui_service)
+
+    workflow = ui_service.workflow_state(plan_id=str(plan["run_id"]))
+
+    assert workflow["state"] == "dry_run_confirmation_required"
+    assert workflow["dry_run_id"] == dry_run["dry_run_id"]
+    assert workflow["dry_run_completed"] is True
+    assert workflow["can_confirm_dry_run"] is True
+    assert workflow["buttons"]["confirm_dry_run"] is True
+    assert workflow["dry_run_summary"]["task"]["total_action_count"] > 0
+
+
+def test_failed_dry_run_is_not_recorded_as_completed(
+    ui_service: FigureExecutionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor_url = "https://app.biorender.com/figure/disposable-test"
+    ui_service._login_verified = True
+    ui_service._verified_canvas = {"editor_url": editor_url, "title": "Test"}
+    task = UiTaskInput.model_validate(_preset_task())
+    plan = ui_service.inspect_plan(task)
+    monkeypatch.setattr(
+        ui_service,
+        "execute_dry_run",
+        lambda _figure_id: FigureStatus.FAILED,
+    )
+
+    dry_run = ui_service.execute_planned_dry_run(str(plan["run_id"]), task)
+    workflow = ui_service.workflow_state(plan_id=str(plan["run_id"]))
+
+    assert dry_run["status"] == "failed"
+    assert dry_run["dry_run_completed"] is False
+    assert dry_run["dry_run_failed"] is True
+    assert dry_run["can_confirm_dry_run"] is False
+    assert workflow["state"] == "dry_run_failed"
+    assert workflow["buttons"]["confirm_dry_run"] is False
+    event_types = {
+        event["event_type"]
+        for event in ui_service.database.list_audit_events(
+            figure_id=str(plan["run_id"])
+        )
+    }
+    assert "dry_run_failed" in event_types
+    assert "dry_run_completed" not in event_types
+
+
+def test_dry_run_confirmation_rejects_fingerprint_mismatch(
+    client: TestClient,
+    ui_service: FigureExecutionService,
+) -> None:
+    _task, plan, dry_run = _prepare_guided_dry_run(ui_service)
+
+    response = client.post(
+        f"/api/ui/runs/{dry_run['dry_run_id']}/confirm-dry-run",
+        json={
+            "task_fingerprint": "0" * 64,
+            "plan_fingerprint": plan["plan_fingerprint"],
+            "source_plan_id": plan["run_id"],
+            "editor_url": "https://app.biorender.com/figure/disposable-test",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "DRY_RUN_FINGERPRINT_MISMATCH"
+
+
+def test_confirmed_dry_run_unlocks_live_and_survives_service_refresh(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "persistent-confirmation.sqlite3"
+    service = FigureExecutionService(FigureDatabase(database_path))
+    task, plan, dry_run = _prepare_guided_dry_run(service)
+    confirmed = service.confirm_dry_run(
+        str(dry_run["dry_run_id"]),
+        task_fingerprint=str(plan["task_fingerprint"]),
+        plan_fingerprint=str(plan["plan_fingerprint"]),
+        source_plan_id=str(plan["run_id"]),
+        editor_url="https://app.biorender.com/figure/disposable-test",
+    )
+    assert confirmed["dry_run_confirmed"] is True
+
+    refreshed = FigureExecutionService(FigureDatabase(database_path))
+    refreshed._login_verified = True
+    refreshed._verified_canvas = {
+        "editor_url": "https://app.biorender.com/figure/disposable-test",
+        "title": "Disposable test figure",
+    }
+    workflow = refreshed.workflow_state(plan_id=str(plan["run_id"]))
+
+    assert workflow["state"] == "ready_to_execute"
+    assert workflow["dry_run_confirmed"] is True
+    assert workflow["buttons"]["start_live"] is True
 
 
 def test_plan_endpoint_enforces_login_and_canvas_gate(client: TestClient) -> None:

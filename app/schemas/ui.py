@@ -157,6 +157,18 @@ class UiDryRunRequest(BaseModel):
     plan_id: str = Field(pattern=r"^figure_[a-zA-Z0-9_-]+$")
 
 
+class UiDryRunConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_fingerprint: str | None = Field(default=None, min_length=16, max_length=128)
+    plan_fingerprint: str | None = Field(default=None, min_length=16, max_length=128)
+    source_plan_id: str | None = Field(
+        default=None,
+        pattern=r"^figure_[a-zA-Z0-9_-]+$",
+    )
+    editor_url: str | None = Field(default=None, min_length=12, max_length=2048)
+
+
 class SafeEditorUrlMixin(BaseModel):
     editor_url: str = Field(min_length=12, max_length=2048)
 

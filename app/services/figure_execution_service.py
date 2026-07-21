@@ -182,10 +182,14 @@ class FigureExecutionService:
             )
         bundle = self.plan_task(task)
         fingerprint = self._task_fingerprint(task)
+        plan_fingerprint = self._plan_fingerprint(task)
         self.database.add_audit_event(
             "ui_plan_parsed",
             {
                 "task_fingerprint": fingerprint,
+                "plan_fingerprint": plan_fingerprint,
+                "canvas_fingerprint": self._current_canvas_fingerprint(),
+                "target_canvas": self._current_canvas_summary(),
                 "summary": self.plan_summary(bundle),
             },
             figure_id=bundle.figure_spec.id,
@@ -193,6 +197,7 @@ class FigureExecutionService:
         return {
             **self.run_summary(bundle.figure_spec.id),
             "task_fingerprint": fingerprint,
+            "plan_fingerprint": plan_fingerprint,
             "task_summary": self.plan_summary(bundle),
             "scientific_validation_passed": bundle.scientific_validation.passed,
             "validation_issues": [
@@ -208,16 +213,25 @@ class FigureExecutionService:
     ) -> dict[str, Any]:
         self._require_parsed_plan(plan_id, task)
         status = self.execute_dry_run(plan_id)
+        event_type = (
+            "dry_run_completed"
+            if status == FigureStatus.AWAITING_CONFIRMATION
+            else "dry_run_failed"
+        )
         self.database.add_audit_event(
-            "dry_run_completed",
+            event_type,
             {
                 "figure_status": status.value,
                 "task_fingerprint": self._task_fingerprint(task),
+                "plan_fingerprint": self._plan_fingerprint(task),
+                "canvas_fingerprint": self._current_canvas_fingerprint(),
+                "target_canvas": self._current_canvas_summary(),
+                "source_plan_id": plan_id,
                 "real_biorender_modified": False,
             },
             figure_id=plan_id,
         )
-        return self.run_summary(plan_id, status_override=status)
+        return self.dry_run_response(plan_id, status_override=status)
 
     def plan_and_execute_dry_run(self, task: UiTaskInput) -> dict[str, Any]:
         """Compatibility helper for non-UI callers that still need a one-shot dry run."""
@@ -232,18 +246,57 @@ class FigureExecutionService:
         )
         return self.execute_planned_dry_run(bundle.figure_spec.id, task)
 
-    def confirm_dry_run(self, figure_id: str) -> dict[str, Any]:
+    def confirm_dry_run(
+        self,
+        figure_id: str,
+        *,
+        task_fingerprint: str | None = None,
+        plan_fingerprint: str | None = None,
+        source_plan_id: str | None = None,
+        editor_url: str | None = None,
+    ) -> dict[str, Any]:
         metadata = self._dry_run_metadata(figure_id)
         if not metadata["completed"]:
             raise UiServiceError(
                 "DRY_RUN_NOT_READY",
                 "该任务不是已完成的安全预演，无法确认。",
             )
+        if source_plan_id is not None and source_plan_id != metadata["source_plan_id"]:
+            raise UiServiceError(
+                "DRY_RUN_FINGERPRINT_MISMATCH",
+                "当前计划与安全预演不一致，请重新执行预演。",
+            )
+        if task_fingerprint is not None and task_fingerprint != metadata["task_fingerprint"]:
+            raise UiServiceError(
+                "DRY_RUN_FINGERPRINT_MISMATCH",
+                "当前 Prompt 已修改，请重新执行安全预演。",
+            )
+        if plan_fingerprint is not None and plan_fingerprint != metadata["plan_fingerprint"]:
+            raise UiServiceError(
+                "DRY_RUN_FINGERPRINT_MISMATCH",
+                "当前计划或目标画布已变化，请重新执行安全预演。",
+            )
+        if editor_url is not None:
+            if self._canvas_fingerprint(editor_url) != metadata["canvas_fingerprint"]:
+                raise UiServiceError(
+                    "DRY_RUN_FINGERPRINT_MISMATCH",
+                    "当前画布已变化，请重新执行安全预演。",
+                )
+        current_canvas_fingerprint = self._current_canvas_fingerprint()
+        if (
+            metadata["canvas_fingerprint"]
+            and current_canvas_fingerprint
+            and metadata["canvas_fingerprint"] != current_canvas_fingerprint
+        ):
+            raise UiServiceError(
+                "DRY_RUN_FINGERPRINT_MISMATCH",
+                "后端确认的目标画布已变化，请重新执行安全预演。",
+            )
         record = self.database.get_figure(figure_id)
         if record is None:
             raise UiServiceError("RUN_NOT_FOUND", "未找到绘图任务。")
         if metadata["confirmed"] and record["status"] == FigureStatus.COMPLETED.value:
-            return self.run_summary(figure_id)
+            return self.dry_run_response(figure_id)
         try:
             self.engine.confirm(figure_id)
         except ValueError as error:
@@ -259,7 +312,7 @@ class FigureExecutionService:
             },
             figure_id=figure_id,
         )
-        return self.run_summary(figure_id)
+        return self.dry_run_response(figure_id)
 
     def execute_live_sync(self, figure_id: str) -> FigureStatus:
         return self.engine.execute(figure_id, self._new_live_operator())
@@ -504,6 +557,24 @@ class FigureExecutionService:
                 ),
                 None,
             )
+        effective_dry_run_id = dry_run_id
+        if effective_dry_run_id is None:
+            for candidate in (run_id, plan_id):
+                if candidate and self.database.get_figure(candidate) is not None:
+                    candidate_metadata = self._dry_run_metadata(candidate)
+                    if candidate_metadata["completed"] or candidate_metadata["failed"]:
+                        effective_dry_run_id = candidate
+                        break
+        dry_run_metadata = (
+            self._dry_run_metadata(effective_dry_run_id)
+            if effective_dry_run_id
+            else None
+        )
+        dry_run_stale_reason = (
+            self._dry_run_stale_reason(dry_run_metadata)
+            if dry_run_metadata
+            else None
+        )
         state = "login_required"
         step = 1
         reason = "请先由您本人在 BioRender 官方页面完成登录。"
@@ -531,6 +602,25 @@ class FigureExecutionService:
             step = 2
             reason = "登录已确认，请指定并检查可测试的空白画布。"
             next_action = "输入 Figure URL 并检查画布"
+        elif dry_run_metadata is not None:
+            step = 4
+            if dry_run_metadata["failed"]:
+                state = "dry_run_failed"
+                reason = "安全预演失败，不能确认或开始真实执行。"
+                next_action = "查看预演结果并修正后重新预演"
+            elif dry_run_stale_reason:
+                state = "dry_run_stale"
+                reason = dry_run_stale_reason
+                next_action = "重新执行安全预演"
+            elif dry_run_metadata["completed"] and not dry_run_metadata["confirmed"]:
+                state = "dry_run_confirmation_required"
+                reason = "安全预演已完成，未操作真实 BioRender 页面。"
+                next_action = "查看并确认预演结果"
+            elif dry_run_metadata["confirmed"]:
+                state = "ready_to_execute"
+                step = 4
+                reason = "预演结果已确认，开始执行前会再次提示将修改真实画布。"
+                next_action = "开始执行"
         elif run_id:
             summary = self.run_summary(run_id)
             status = str(summary["status"])
@@ -564,18 +654,6 @@ class FigureExecutionService:
                 state = "completed"
                 reason = "任务已结束，结果已通过当前证据验证。"
                 next_action = "查看完成结果"
-        elif dry_run_id:
-            metadata = self._dry_run_metadata(dry_run_id)
-            if metadata["completed"] and not metadata["confirmed"]:
-                state = "dry_run_confirmation_required"
-                step = 3
-                reason = "安全预演已完成，未操作真实 BioRender 页面。"
-                next_action = "确认预演结果并继续"
-            elif metadata["confirmed"]:
-                state = "ready_to_execute"
-                step = 4
-                reason = "预演结果已确认，开始执行前会再次提示将修改真实画布。"
-                next_action = "开始执行"
         elif plan_id:
             state = "prompt_parsed"
             step = 3
@@ -591,11 +669,15 @@ class FigureExecutionService:
             "prompt_parsed": "parsed",
             "dry_run_confirmation_required": "confirmation_required",
             "ready_to_execute": "confirmed",
+            "dry_run_failed": "failed",
+            "dry_run_stale": "stale",
         }.get(state)
         next_block_reason = {
             "prompt_required": "请先解析绘图需求",
             "prompt_parsed": "",
             "dry_run_confirmation_required": "请先确认安全预演结果",
+            "dry_run_failed": "安全预演失败，不能确认",
+            "dry_run_stale": dry_run_stale_reason or "预演已失效，请重新预演",
         }.get(state, "")
         return {
             "state": state,
@@ -604,7 +686,27 @@ class FigureExecutionService:
             "next_action": next_action,
             "step3_phase": step3_phase,
             "next_block_reason": next_block_reason,
-            "refresh_recoverable": bool(active or plan_id or dry_run_id or run_id),
+            "refresh_recoverable": bool(active or plan_id or effective_dry_run_id or run_id),
+            "current_workflow_state": state,
+            "active_run_id": active.figure_id if active else None,
+            "dry_run_id": effective_dry_run_id,
+            "dry_run_completed": bool(dry_run_metadata and dry_run_metadata["completed"]),
+            "dry_run_failed": bool(dry_run_metadata and dry_run_metadata["failed"]),
+            "dry_run_confirmed": bool(dry_run_metadata and dry_run_metadata["confirmed"]),
+            "can_confirm_dry_run": state == "dry_run_confirmation_required",
+            "task_fingerprint": (
+                dry_run_metadata["task_fingerprint"]
+                if dry_run_metadata
+                else self._plan_metadata(plan_id)["task_fingerprint"] if plan_id else None
+            ),
+            "plan_fingerprint": (
+                dry_run_metadata["plan_fingerprint"]
+                if dry_run_metadata
+                else self._plan_metadata(plan_id)["plan_fingerprint"] if plan_id else None
+            ),
+            "source_plan_id": (
+                dry_run_metadata["source_plan_id"] if dry_run_metadata else plan_id
+            ),
             "buttons": {
                 "open_login": state == "login_required",
                 "check_login": state == "login_checking",
@@ -620,6 +722,11 @@ class FigureExecutionService:
             },
             "plan_summary": (
                 self._plan_metadata(plan_id)["summary"] if plan_id else None
+            ),
+            "dry_run_summary": (
+                self._dry_run_summary(effective_dry_run_id)
+                if effective_dry_run_id
+                else None
             ),
         }
 
@@ -685,8 +792,9 @@ class FigureExecutionService:
             ),
             "real_biorender_accepted": False,
             "task_fingerprint": effective_task_fingerprint,
+            "plan_fingerprint": dry_run["plan_fingerprint"],
+            "source_plan_id": dry_run["source_plan_id"] or source.get("plan_id"),
             "source_dry_run_id": source.get("dry_run_id"),
-            "source_plan_id": source.get("plan_id"),
             "dry_run_gate": source.get("gate"),
             "prepare_failure": prepare_failure,
             "completed_at": (
@@ -706,6 +814,52 @@ class FigureExecutionService:
                 }
                 for item in actions[-5:]
             ],
+            "dry_run_summary": (
+                self._dry_run_summary(figure_id)
+                if dry_run["completed"] or dry_run["failed"]
+                else None
+            ),
+        }
+
+    def dry_run_response(
+        self,
+        figure_id: str,
+        *,
+        status_override: FigureStatus | None = None,
+    ) -> dict[str, Any]:
+        run = self.run_summary(figure_id, status_override=status_override)
+        metadata = self._dry_run_metadata(figure_id)
+        failed = metadata["failed"] or run["status"] in {
+            FigureStatus.FAILED.value,
+            FigureStatus.BLOCKED.value,
+        }
+        confirmed = metadata["confirmed"] and run["status"] == FigureStatus.COMPLETED.value
+        completed = metadata["completed"] and not failed
+        status = (
+            "confirmed"
+            if confirmed
+            else "awaiting_confirmation"
+            if completed
+            else "failed"
+            if failed
+            else run["status"]
+        )
+        stale_reason = self._dry_run_stale_reason(metadata)
+        can_confirm = bool(completed and not confirmed and not stale_reason)
+        return {
+            "dry_run_id": figure_id,
+            "run_id": figure_id,
+            "status": status,
+            "dry_run_completed": completed,
+            "dry_run_failed": failed,
+            "dry_run_confirmed": confirmed,
+            "can_confirm_dry_run": can_confirm,
+            "task_fingerprint": metadata["task_fingerprint"],
+            "plan_fingerprint": metadata["plan_fingerprint"],
+            "source_plan_id": metadata["source_plan_id"],
+            "summary": self._dry_run_summary(figure_id),
+            "run_summary": run,
+            "stale_reason": stale_reason,
         }
 
     # ------------------------------------------------------------------ helpers
@@ -1060,19 +1214,221 @@ class FigureExecutionService:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _canvas_fingerprint(editor_url: str) -> str:
+        parsed = urlparse(editor_url.strip())
+        normalized = f"{parsed.scheme.casefold()}://{parsed.netloc.casefold()}{parsed.path.rstrip('/')}"
+        if parsed.query:
+            normalized = f"{normalized}?{parsed.query}"
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _current_canvas_fingerprint(self) -> str | None:
+        if not self._verified_canvas or not self._verified_canvas.get("editor_url"):
+            return None
+        return self._canvas_fingerprint(self._verified_canvas["editor_url"])
+
+    def _current_canvas_summary(self) -> dict[str, Any] | None:
+        if not self._verified_canvas:
+            return None
+        editor_url = self._verified_canvas.get("editor_url")
+        return {
+            "redacted_url": self.redact_url(editor_url) if editor_url else None,
+            "title": self._verified_canvas.get("title") or "BioRender Figure",
+            "figure_identifier": self._verified_canvas.get("figure_identifier"),
+            "confirmed_test_canvas": True,
+        }
+
+    def _plan_fingerprint(self, task: UiTaskInput) -> str:
+        payload = {
+            "task_fingerprint": self._task_fingerprint(task),
+            "canvas_fingerprint": self._current_canvas_fingerprint(),
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _dry_run_stale_reason(self, metadata: dict[str, Any]) -> str | None:
+        source_plan_id = metadata.get("source_plan_id")
+        if source_plan_id:
+            plan = self._plan_metadata(source_plan_id)
+            if (
+                plan.get("task_fingerprint")
+                and metadata.get("task_fingerprint") != plan.get("task_fingerprint")
+            ):
+                return "当前 Prompt 已修改，请重新预演。"
+            if (
+                plan.get("plan_fingerprint")
+                and metadata.get("plan_fingerprint") != plan.get("plan_fingerprint")
+            ):
+                return "当前计划已变化，请重新预演。"
+        current_canvas = self._current_canvas_fingerprint()
+        if (
+            metadata.get("canvas_fingerprint")
+            and current_canvas
+            and metadata["canvas_fingerprint"] != current_canvas
+        ):
+            return "当前画布已变化，请重新预演。"
+        return None
+
+    def _dry_run_summary(self, figure_id: str) -> dict[str, Any]:
+        record = self.database.get_figure(figure_id)
+        if record is None:
+            raise UiServiceError("RUN_NOT_FOUND", "未找到绘图任务。")
+        actions = self.database.list_actions(figure_id)
+        states = {item["id"]: item for item in self.database.action_states(figure_id)}
+        metadata = self._dry_run_metadata(figure_id)
+        plan = self._plan_metadata(metadata["source_plan_id"] or figure_id)
+        plan_summary = plan.get("summary") or {}
+        spec = record["spec"]
+        action_items: list[dict[str, Any]] = []
+        searches: list[str] = []
+        inserts: list[str] = []
+        labels: list[str] = []
+        connections: list[str] = []
+        layout_adjusted = False
+        layout_types = {
+            ActionType.MOVE_ELEMENT.value,
+            ActionType.RESIZE_ELEMENT.value,
+            ActionType.ROTATE_ELEMENT.value,
+            ActionType.GROUP_ELEMENTS.value,
+            ActionType.ALIGN_ELEMENTS.value,
+            ActionType.DISTRIBUTE_ELEMENTS.value,
+        }
+        for action in actions:
+            arguments = action.arguments
+            action_type = action.action.value
+            query = arguments.get("query") or arguments.get("search_term")
+            if action_type == ActionType.SEARCH_ASSET.value and query:
+                searches.append(str(query))
+            if action_type == ActionType.DRAG_ASSET.value:
+                inserts.append(
+                    str(arguments.get("entity_id") or arguments.get("element_id") or action.id)
+                )
+            if action_type in {ActionType.ADD_TEXT.value, ActionType.EDIT_TEXT.value}:
+                label = arguments.get("text") or arguments.get("label")
+                if label:
+                    labels.append(str(label))
+            if action_type == ActionType.CONNECT.value:
+                source = arguments.get("source_id") or arguments.get("source_element_id")
+                target = arguments.get("target_id") or arguments.get("target_element_id")
+                connections.append(f"{source or '?'} → {target or '?'}")
+            if action_type in layout_types:
+                layout_adjusted = True
+            action_state = states.get(action.id, {})
+            action_items.append(
+                {
+                    "sequence": action.sequence,
+                    "action_id": action.id,
+                    "action_type": action_type,
+                    "status": action_state.get("status", "planned"),
+                    "risk_level": action.risk_level.value,
+                    "requires_approval": action.requires_approval,
+                    "blocked": action_state.get("status") == "blocked_by_policy",
+                }
+            )
+        blocked_count = sum(item["blocked"] for item in action_items)
+        warning_items = list(plan_summary.get("risks") or [])
+        review_items = [
+            f"动作 {item['sequence']} 需要人工批准"
+            for item in action_items
+            if item["requires_approval"]
+        ]
+        audit_events = self.database.list_audit_events(figure_id=figure_id)
+        relevant_audit = next(
+            (
+                {
+                    "event_type": event["event_type"],
+                    "created_at": event["created_at"],
+                    "payload": event["payload"],
+                }
+                for event in reversed(audit_events)
+                if event["event_type"]
+                in {"dry_run_completed", "dry_run_failed", "dry_run_confirmed"}
+            ),
+            None,
+        )
+        can_enter_live = bool(
+            metadata["completed"]
+            and not metadata["failed"]
+            and blocked_count == 0
+            and self._dry_run_stale_reason(metadata) is None
+        )
+        target_canvas = metadata.get("target_canvas") or plan.get("target_canvas")
+        return {
+            "target_canvas": target_canvas
+            or {
+                "redacted_url": None,
+                "title": "BioRender Figure",
+                "figure_identifier": None,
+                "confirmed_test_canvas": False,
+            },
+            "task": {
+                "figure_title": record["title"],
+                "asset_count": len(spec.get("entities", [])),
+                "label_count": sum(bool(item.get("label")) for item in spec.get("entities", [])),
+                "connection_count": len(spec.get("relations", [])),
+                "total_action_count": len(actions),
+                "layout": plan_summary.get("layout_description"),
+            },
+            "planned_actions": {
+                "search_assets": list(dict.fromkeys(searches)),
+                "insert_assets": list(dict.fromkeys(inserts)),
+                "add_labels": list(dict.fromkeys(labels)),
+                "add_connections": connections,
+                "adjust_layout": layout_adjusted,
+            },
+            "safety_limits": {
+                "biorender_ai_generate": "forbidden",
+                "export": "forbidden",
+                "share": "forbidden",
+                "purchase": "forbidden",
+                "other_figures": "not_modified",
+                "real_biorender_modified": False,
+            },
+            "result": {
+                "policy_check_passed": can_enter_live,
+                "blocked_action_count": blocked_count,
+                "warning_count": len(warning_items),
+                "warnings": warning_items,
+                "manual_review_items": review_items,
+                "can_enter_live_run": can_enter_live,
+            },
+            "evidence": {
+                "screenshot_note": "安全预演不打开真实页面，因此不产生真实画布截图。",
+                "audit_event": relevant_audit,
+                "recent_logs": [
+                    {
+                        "sequence": item["sequence"],
+                        "action_type": item["action_type"],
+                        "status": item["status"],
+                    }
+                    for item in action_items[-5:]
+                ],
+            },
+            "dry_run_actions": action_items,
+        }
+
     def _dry_run_metadata(self, figure_id: str) -> dict[str, Any]:
         completed_event = None
+        failed_event = None
         confirmed_event = None
         for event in self.database.list_audit_events(figure_id=figure_id):
             if event["event_type"] == "dry_run_completed":
                 completed_event = event
+            elif event["event_type"] == "dry_run_failed":
+                failed_event = event
             elif event["event_type"] == "dry_run_confirmed":
                 confirmed_event = event
-        completed_payload = completed_event["payload"] if completed_event else {}
+        source_event = completed_event or failed_event
+        completed_payload = source_event["payload"] if source_event else {}
         return {
             "completed": completed_event is not None,
+            "failed": failed_event is not None,
             "confirmed": confirmed_event is not None,
             "task_fingerprint": completed_payload.get("task_fingerprint"),
+            "plan_fingerprint": completed_payload.get("plan_fingerprint"),
+            "canvas_fingerprint": completed_payload.get("canvas_fingerprint"),
+            "target_canvas": completed_payload.get("target_canvas"),
+            "source_plan_id": completed_payload.get("source_plan_id") or figure_id,
         }
 
     def _plan_metadata(self, figure_id: str) -> dict[str, Any]:
@@ -1090,6 +1446,9 @@ class FigureExecutionService:
         return {
             "parsed": parsed_event is not None,
             "task_fingerprint": payload.get("task_fingerprint"),
+            "plan_fingerprint": payload.get("plan_fingerprint"),
+            "canvas_fingerprint": payload.get("canvas_fingerprint"),
+            "target_canvas": payload.get("target_canvas"),
             "summary": payload.get("summary"),
         }
 

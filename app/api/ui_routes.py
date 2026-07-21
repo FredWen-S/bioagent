@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from app.schemas.ui import (
     UiCalibrationRequest,
     UiCanvasCheckRequest,
+    UiDryRunConfirmRequest,
     UiDryRunRequest,
     UiEditorUrlRequest,
     UiLiveRunRequest,
@@ -91,8 +92,18 @@ def create_ui_router(service: FigureExecutionService) -> APIRouter:
         return service.execute_planned_dry_run(payload.plan_id, payload.task)
 
     @router.post("/runs/{run_id}/confirm-dry-run")
-    def confirm_dry_run(run_id: str) -> dict[str, object]:
-        return service.confirm_dry_run(run_id)
+    def confirm_dry_run(
+        run_id: str,
+        payload: UiDryRunConfirmRequest | None = None,
+    ) -> dict[str, object]:
+        confirmation = payload or UiDryRunConfirmRequest()
+        return service.confirm_dry_run(
+            run_id,
+            task_fingerprint=confirmation.task_fingerprint,
+            plan_fingerprint=confirmation.plan_fingerprint,
+            source_plan_id=confirmation.source_plan_id,
+            editor_url=confirmation.editor_url,
+        )
 
     @router.post("/calibrate", status_code=202)
     def start_calibration(payload: UiCalibrationRequest) -> dict[str, object]:

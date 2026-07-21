@@ -142,6 +142,53 @@
           <div><span>目标画布</span><strong id="run-canvas">-</strong></div>
           <div><span>任务摘要</span><strong id="run-task">-</strong></div>
         </div>
+        <section id="dry-run-review" class="dry-run-review" hidden aria-live="polite">
+          <div class="summary-header"><strong>需要您确认的安全预演内容</strong><span class="status-badge warning">未修改真实画布</span></div>
+          <div class="dry-review-grid">
+            <article>
+              <h4>1. 目标画布</h4>
+              <p><strong>Figure URL：</strong><span id="dry-canvas-url">-</span></p>
+              <p><strong>测试画布：</strong><span id="dry-canvas-confirmed">-</span></p>
+            </article>
+            <article>
+              <h4>2. 任务摘要</h4>
+              <p><strong>Figure 标题：</strong><span id="dry-title">-</span></p>
+              <div class="dry-counts"><span>素材 <strong id="dry-assets">0</strong></span><span>标签 <strong id="dry-labels">0</strong></span><span>连接 <strong id="dry-connections">0</strong></span><span>动作 <strong id="dry-total-actions">0</strong></span></div>
+            </article>
+          </div>
+          <div class="dry-review-grid">
+            <article>
+              <h4>3. 即将执行的主要动作</h4>
+              <p><strong>搜索素材</strong></p><ul id="dry-searches"><li>等待预演摘要</li></ul>
+              <p><strong>插入素材</strong></p><ul id="dry-inserts"><li>等待预演摘要</li></ul>
+              <p><strong>添加标签</strong></p><ul id="dry-label-actions"><li>等待预演摘要</li></ul>
+              <p><strong>添加连接</strong></p><ul id="dry-connection-actions"><li>等待预演摘要</li></ul>
+              <p><strong>布局：</strong><span id="dry-layout">-</span></p>
+            </article>
+            <article>
+              <h4>4. 安全限制</h4>
+              <ul class="safety-limit-list">
+                <li>不调用 BioRender AI Generate</li>
+                <li>不 Export</li>
+                <li>不 Share</li>
+                <li>不 Purchase</li>
+                <li>不修改其他 Figure</li>
+              </ul>
+              <h4>5. 预演结果</h4>
+              <p><strong>Policy 检查：</strong><span id="dry-policy">-</span></p>
+              <p><strong>被阻止动作：</strong><span id="dry-blocked">0</span></p>
+              <p><strong>警告：</strong><span id="dry-warnings">0</span></p>
+              <p><strong>人工复核：</strong></p><ul id="dry-review-items"><li>等待预演摘要</li></ul>
+              <p><strong>Live Run：</strong><span id="dry-live-ready">-</span></p>
+            </article>
+          </div>
+          <article class="dry-evidence">
+            <h4>6. 预演证据</h4>
+            <p id="dry-screenshot-note">安全预演不产生真实画布截图。</p>
+            <p><strong>Audit event：</strong><span id="dry-audit">-</span></p>
+            <div class="table-wrap"><table><thead><tr><th>序号</th><th>动作</th><th>状态</th><th>风险 / 策略</th></tr></thead><tbody id="dry-action-body"></tbody></table></div>
+          </article>
+        </section>
         <div class="progress-heading"><span>总进度</span><strong id="progress-percent">0%</strong></div>
         <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
         <ol id="progress-steps" class="progress-steps">
@@ -178,6 +225,7 @@
           <button id="start-live" class="button button-danger" type="button" disabled>开始执行</button>
           <button id="resume-run" class="button button-secondary" type="button" disabled>继续上次任务</button>
         </div>
+        <p id="dry-run-confirm-reason" class="field-message confirm-reason" aria-live="polite">尚未完成安全预演。</p>
         <details class="advanced-info"><summary>高级信息</summary><pre id="advanced-details">暂无运行详情。</pre></details>
       </article>
 
