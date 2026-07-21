@@ -28,6 +28,28 @@ SEARCH_INPUT_LOCATORS = (
     LocatorSpec("css", "input[placeholder*='search' i]", confidence=0.9),
     LocatorSpec("css", "input[type='search']", confidence=0.86),
     LocatorSpec("css", "[data-testid*='search'] input", confidence=0.84),
+    LocatorSpec("css", "[role='searchbox']", confidence=0.83),
+    LocatorSpec("css", "[contenteditable='true'][aria-label*='search' i]", confidence=0.82),
+    LocatorSpec("css", "[contenteditable='true'][data-placeholder*='search' i]", confidence=0.8),
+    LocatorSpec("css", "[placeholder*='search' i]", confidence=0.78),
+)
+
+ASSET_PANEL_ENTRY_LOCATORS = (
+    LocatorSpec("role", r"^search$|icons? and templates|搜索", role="button", confidence=0.96),
+    LocatorSpec("label", r"^search$|icons? and templates|搜索", confidence=0.93),
+    LocatorSpec("css", "[data-testid*='search'][role='button']", confidence=0.9),
+    LocatorSpec("css", "[aria-label='Icons and templates' i]", confidence=0.88),
+)
+
+SEARCH_EMPTY_LOCATORS = (
+    LocatorSpec("text", r"no results|no assets|未找到|没有结果", confidence=0.94),
+    LocatorSpec("css", "[data-testid*='no-results']", confidence=0.92),
+    LocatorSpec("css", "[data-testid*='empty-state']", confidence=0.86),
+)
+
+SEARCH_RATE_LIMIT_LOCATORS = (
+    LocatorSpec("text", r"429|too many requests|rate limit|请求过多|稍后再试", confidence=0.98),
+    LocatorSpec("css", "[data-testid*='rate-limit']", confidence=0.95),
 )
 
 SEARCH_RESULTS_LOCATORS = (

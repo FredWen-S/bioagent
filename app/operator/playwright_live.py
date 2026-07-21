@@ -47,6 +47,7 @@ from app.operator.errors import (
     EditorPrepareFailed,
     OperatorError,
     PolicyBlocked,
+    SearchActionFailed,
     SearchNoResult,
     UiLayoutChanged,
     UnsupportedLiveAction,
@@ -158,6 +159,8 @@ class LivePlaywrightOperator:
         self._profile_versions: dict[str, str] = {}
         self._current_figure_id: str | None = None
         self._attempt = 1
+        self._stop_requested: Any = lambda: False
+        self._search_rate_limit_until = 0.0
         if editor_ready_timeout_seconds <= 0:
             raise ValueError("editor_ready_timeout_seconds must be > 0")
         if editor_ready_poll_interval_seconds <= 0:
@@ -173,6 +176,9 @@ class LivePlaywrightOperator:
         # actually sleeping for the full 30-second production timeout.
         self._clock: Any = time.monotonic
         self._sleep: Any = time.sleep
+
+    def set_stop_requested(self, callback: Any) -> None:
+        self._stop_requested = callback or (lambda: False)
 
     @staticmethod
     def require_playwright() -> Any:
@@ -858,16 +864,33 @@ class LivePlaywrightOperator:
         return "timeout" in message and "navigat" in message
 
     def _search_asset(self, action: GuiAction) -> LiveActionEvidence:
+        if time.monotonic() < self._search_rate_limit_until:
+            remaining = round(self._search_rate_limit_until - time.monotonic(), 1)
+            raise SearchActionFailed(
+                f"BioRender search circuit breaker is cooling down for {remaining}s.",
+                subcode="search_rate_limited",
+                diagnostics={"circuit_breaker_open": True, "cooldown_remaining": remaining},
+                retryable=False,
+            )
         queries = [action.arguments["query"], *action.arguments.get("fallback_queries", [])]
         queries = queries[: int(action.arguments.get("max_queries", 5))]
         failures: list[str] = []
+        search = SafeAssetSearch(
+            self._page,
+            evidence_dir=self.evidence_dir,
+            policy=self.biorender_policy,
+            stop_requested=self._stop_requested,
+            timeout_seconds=30.0,
+        )
+        deadline = time.monotonic() + 30.0
         for query in queries:
             try:
-                outcome = SafeAssetSearch(
-                    self._page,
-                    evidence_dir=self.evidence_dir,
-                    policy=self.biorender_policy,
-                ).search(query, f"{action.figure_id}/{action.id}", max_attempts=2)
+                outcome = search.search(
+                    query,
+                    f"{action.figure_id}/{action.id}",
+                    max_attempts=2,
+                    deadline=deadline,
+                )
                 self._safe_candidate = outcome.selected
                 self._selected_entity_id = str(action.arguments["entity_id"])
                 self._selected_query = query
@@ -886,12 +909,30 @@ class LivePlaywrightOperator:
                         "candidate_count": len(outcome.candidates),
                         "selected_candidate": outcome.selected.record.model_dump(mode="json"),
                         "query_failures": failures,
+                        "search_diagnostics": outcome.diagnostics,
                     },
                 )
-            except (SearchNoResult, CandidateIdentityUnclear, UiLayoutChanged) as error:
+            except SearchActionFailed as error:
                 failures.append(f"{query}: {error}")
-        raise SearchNoResult(
-            f"No proven ordinary BioRender asset for queries {queries}: {failures}"
+                error.diagnostics["queries"] = queries
+                error.diagnostics["query_failures"] = failures
+                if error.subcode == "search_rate_limited":
+                    self._search_rate_limit_until = time.monotonic() + 30.0
+                if error.subcode in {
+                    "search_ui_not_found",
+                    "search_input_not_editable",
+                    "search_submit_failed",
+                    "search_results_timeout",
+                    "search_rate_limited",
+                    "page_closed",
+                    "redirected_to_login",
+                }:
+                    raise
+        raise SearchActionFailed(
+            f"No ordinary BioRender asset was found for queries {queries}: {failures}",
+            subcode="search_no_results",
+            diagnostics={"queries": queries, "query_failures": failures},
+            retryable=False,
         )
 
     def _select_asset(self, action: GuiAction) -> LiveActionEvidence:

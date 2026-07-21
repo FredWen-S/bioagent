@@ -20,6 +20,9 @@ class FakeElement:
     has_thumbnail: bool = False
     filled_value: str | None = None
     clicked: bool = False
+    pressed_keys: list[str] = field(default_factory=list)
+    enabled: bool = True
+    editable: bool = True
 
 
 class FakeLocator:
@@ -57,6 +60,16 @@ class FakeLocator:
     def fill(self, value: str) -> None:
         if self.elements:
             self.elements[0].filled_value = value
+
+    def press(self, key: str) -> None:
+        if self.elements:
+            self.elements[0].pressed_keys.append(key)
+
+    def is_enabled(self) -> bool:
+        return bool(self.elements and self.elements[0].enabled)
+
+    def is_editable(self) -> bool:
+        return bool(self.elements and self.elements[0].editable)
 
     def scroll_into_view_if_needed(self) -> None:
         return None

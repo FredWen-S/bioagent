@@ -29,7 +29,7 @@ from app.operator.biorender.reconciliation import (
 )
 from app.operator.biorender.search import SafeAssetSearch
 from app.operator.dry_run import DryRunOperator
-from app.operator.errors import CalibrationFailed, PolicyBlocked
+from app.operator.errors import CalibrationFailed, PolicyBlocked, SearchActionFailed
 from app.schemas.biorender_probe import (
     AssetCandidateRecord,
     InsertionObservation,
@@ -87,6 +87,9 @@ def test_ordinary_asset_search_is_allowed_and_candidate_is_proven(tmp_path: Path
     page = FakePage(
         selector_map={
             "searchbox-fixture": [search_input],
+            ASSET_PANEL_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 0, "width": 320, "height": 900})
+            ],
             SEARCH_RESULTS_LOCATORS[0].query: [results],
             INTERACTIVE_SELECTOR: [],
             MODAL_SELECTOR: [],
@@ -94,9 +97,72 @@ def test_ordinary_asset_search_is_allowed_and_candidate_is_proven(tmp_path: Path
     )
     outcome = SafeAssetSearch(page, evidence_dir=tmp_path).search("T cell", "probe_safe")
     assert search_input.filled_value == "T cell"
+    assert search_input.pressed_keys == ["Enter"]
+    assert outcome.diagnostics["search_input_found"] is True
+    assert outcome.diagnostics["fill_executed"] is True
+    assert outcome.diagnostics["enter_executed"] is True
     assert outcome.selected.record.draggable is True
     assert outcome.selected.record.in_results_region is True
     assert outcome.selected.record.rejected_reasons == []
+
+
+def test_search_ui_failure_records_locator_counts_without_submitting(
+    tmp_path: Path,
+) -> None:
+    panel = FakeElement(
+        text="Icons and templates",
+        bbox={"x": 0, "y": 0, "width": 320, "height": 900},
+    )
+    page = FakePage(selector_map={ASSET_PANEL_LOCATORS[0].query: [panel]})
+
+    with pytest.raises(SearchActionFailed) as raised:
+        SafeAssetSearch(
+            page,
+            evidence_dir=tmp_path,
+            timeout_seconds=0.001,
+        ).search("T cell", "missing-search-ui", max_attempts=1)
+
+    error = raised.value
+    assert error.subcode == "search_ui_not_found"
+    assert error.retryable is False
+    assert error.diagnostics["query"] == "T cell"
+    assert error.diagnostics["attempt"] == 1
+    assert error.diagnostics["asset_panel_found"] is True
+    assert error.diagnostics["search_input_found"] is False
+    assert error.diagnostics["fill_executed"] is False
+    assert error.diagnostics["enter_executed"] is False
+    assert error.diagnostics["last_operation"] == "wait_for_search_input"
+    assert all(
+        {"count", "visible_count", "bbox_count"} <= candidate.keys()
+        for candidate in error.diagnostics["search_input_locator_candidates"]
+    )
+
+
+def test_search_rejects_visible_but_non_editable_input_without_fill(
+    tmp_path: Path,
+) -> None:
+    search_input = FakeElement(
+        bbox={"x": 10, "y": 20, "width": 250, "height": 36},
+        attrs={"role": "searchbox", "accessible_name": "Search assets"},
+        editable=False,
+    )
+    page = FakePage(
+        selector_map={
+            "searchbox-fixture": [search_input],
+            ASSET_PANEL_LOCATORS[0].query: [
+                FakeElement(bbox={"x": 0, "y": 0, "width": 320, "height": 900})
+            ],
+        }
+    )
+
+    with pytest.raises(SearchActionFailed) as raised:
+        SafeAssetSearch(page, evidence_dir=tmp_path).search(
+            "T cell", "non-editable-search", max_attempts=1
+        )
+
+    assert raised.value.subcode == "search_input_not_editable"
+    assert search_input.filled_value is None
+    assert search_input.pressed_keys == []
 
 
 def test_expected_bbox_is_never_automatically_observed() -> None:
@@ -409,7 +475,10 @@ def test_dry_run_does_not_observe_or_modify_live_ui(tmp_path: Path) -> None:
         expected_bbox=viewport_bbox(100, 100, 50, 50),
     )
     result = DryRunOperator(evidence_dir=tmp_path).execute(action)
-    assert result.status == ActionStatus.SUCCEEDED
+    assert result.status == ActionStatus.SIMULATED
+    assert result.metadata["simulation_status"] == "simulated"
+    assert result.metadata["policy_status"] == "policy_allowed"
+    assert result.metadata["live_execution_status"] == "planned"
     assert result.observed_bbox is None
     assert result.metadata["mode"] == "dry-run"
 

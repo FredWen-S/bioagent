@@ -26,7 +26,7 @@ from app.schemas.figure_spec import (
     RelationType,
     Requirement,
 )
-from app.schemas.gui_action import ActionType
+from app.schemas.gui_action import ActionStatus, ActionType
 from app.schemas.ui import CustomFigureInput, UiTaskInput
 from app.storage.database import FigureDatabase
 from app.workflow.engine import WorkflowEngine
@@ -308,7 +308,8 @@ class FigureExecutionService:
             "dry_run_confirmed",
             {
                 "task_fingerprint": metadata["task_fingerprint"],
-                "real_biorender_accepted": False,
+                "confirmed_test_canvas": True,
+                "real_biorender_accepted": True,
             },
             figure_id=figure_id,
         )
@@ -575,6 +576,11 @@ class FigureExecutionService:
             if dry_run_metadata
             else None
         )
+        live_run_requested = bool(
+            run_id
+            and run_id != effective_dry_run_id
+            and self._live_source_metadata(run_id).get("gate")
+        )
         state = "login_required"
         step = 1
         reason = "请先由您本人在 BioRender 官方页面完成登录。"
@@ -602,7 +608,7 @@ class FigureExecutionService:
             step = 2
             reason = "登录已确认，请指定并检查可测试的空白画布。"
             next_action = "输入 Figure URL 并检查画布"
-        elif dry_run_metadata is not None:
+        elif dry_run_metadata is not None and not live_run_requested:
             step = 4
             if dry_run_metadata["failed"]:
                 state = "dry_run_failed"
@@ -688,7 +694,7 @@ class FigureExecutionService:
             "next_block_reason": next_block_reason,
             "refresh_recoverable": bool(active or plan_id or effective_dry_run_id or run_id),
             "current_workflow_state": state,
-            "active_run_id": active.figure_id if active else None,
+            "active_run_id": active.figure_id if active else run_id,
             "dry_run_id": effective_dry_run_id,
             "dry_run_completed": bool(dry_run_metadata and dry_run_metadata["completed"]),
             "dry_run_failed": bool(dry_run_metadata and dry_run_metadata["failed"]),
@@ -781,6 +787,10 @@ class FigureExecutionService:
             "save_status": self._save_status(figure_id),
             "can_resume": can_resume,
             "resume_blocked_reason": resume_blocked_reason,
+            "can_restart": status in {FigureStatus.FAILED.value, FigureStatus.BLOCKED.value},
+            "failure_subcode": (
+                current_action.get("error_type") if current_action else None
+            ),
             "can_stop": self._active_job_for_figure(figure_id) is not None,
             "run_mode": "dry_run" if dry_run["completed"] else "live_or_plan",
             "dry_run_completed": effective_dry_run_completed,
@@ -790,7 +800,14 @@ class FigureExecutionService:
                 and not dry_run["confirmed"]
                 and status == FigureStatus.AWAITING_CONFIRMATION.value
             ),
-            "real_biorender_accepted": False,
+            "confirmed_test_canvas": (
+                dry_run["confirmed_test_canvas"]
+                or bool(source.get("confirmed_test_canvas"))
+            ),
+            "real_biorender_accepted": (
+                dry_run["real_biorender_accepted"]
+                or bool(source.get("real_biorender_accepted"))
+            ),
             "task_fingerprint": effective_task_fingerprint,
             "plan_fingerprint": dry_run["plan_fingerprint"],
             "source_plan_id": dry_run["source_plan_id"] or source.get("plan_id"),
@@ -812,7 +829,11 @@ class FigureExecutionService:
                     "action_type": item["action_type"],
                     "message": item.get("error_type") or item["status"],
                 }
-                for item in actions[-5:]
+                for item in [
+                    action
+                    for action in actions
+                    if action["status"] != ActionStatus.PLANNED.value
+                ][-5:]
             ],
             "dry_run_summary": (
                 self._dry_run_summary(figure_id)
@@ -893,12 +914,16 @@ class FigureExecutionService:
             "dry_run_completed": False,
             "dry_run_confirmed": False,
             "task_fingerprint": None,
+            "confirmed_test_canvas": False,
+            "real_biorender_accepted": False,
         }
         if source_dry_run_id:
             dry = self._dry_run_metadata(source_dry_run_id)
             source_meta["dry_run_completed"] = dry["completed"]
             source_meta["dry_run_confirmed"] = dry["confirmed"]
             source_meta["task_fingerprint"] = dry["task_fingerprint"]
+            source_meta["confirmed_test_canvas"] = dry["confirmed_test_canvas"]
+            source_meta["real_biorender_accepted"] = dry["real_biorender_accepted"]
         elif source_plan_id:
             plan = self._plan_metadata(source_plan_id)
             source_meta["task_fingerprint"] = plan.get("task_fingerprint")
@@ -1000,6 +1025,25 @@ class FigureExecutionService:
             return True, None
         if status != FigureStatus.FAILED.value:
             return False, None
+        search_non_resumable = {
+            "search_ui_not_found",
+            "search_input_not_editable",
+            "search_submit_failed",
+            "search_results_timeout",
+            "search_no_results",
+            "search_rate_limited",
+            "page_closed",
+            "redirected_to_login",
+            "search_no_result",
+        }
+        if (
+            (current_action or {}).get("action_type") == ActionType.SEARCH_ASSET.value
+            and (current_action or {}).get("error_type") in search_non_resumable
+        ):
+            return (
+                False,
+                "搜索能力准备失败；请修复搜索面板/登录/限流问题后重新开始，不要 Resume。",
+            )
         if prepare_failure is not None:
             subcode = prepare_failure.get("subcode")
             reason_by_subcode = {
@@ -1284,6 +1328,8 @@ class FigureExecutionService:
         inserts: list[str] = []
         labels: list[str] = []
         connections: list[str] = []
+        unresolved_connections: list[str] = []
+        entity_ids = {str(item.get("id")) for item in spec.get("entities", [])}
         layout_adjusted = False
         layout_types = {
             ActionType.MOVE_ELEMENT.value,
@@ -1308,21 +1354,41 @@ class FigureExecutionService:
                 if label:
                     labels.append(str(label))
             if action_type == ActionType.CONNECT.value:
-                source = arguments.get("source_id") or arguments.get("source_element_id")
-                target = arguments.get("target_id") or arguments.get("target_element_id")
-                connections.append(f"{source or '?'} → {target or '?'}")
+                source = (
+                    arguments.get("source_entity_id")
+                    or arguments.get("source_id")
+                    or arguments.get("source_element_id")
+                )
+                target = (
+                    arguments.get("target_entity_id")
+                    or arguments.get("target_id")
+                    or arguments.get("target_element_id")
+                )
+                description = f"{source or '?'} → {target or '?'}"
+                connections.append(description)
+                if not source or not target or source not in entity_ids or target not in entity_ids:
+                    unresolved_connections.append(description)
             if action_type in layout_types:
                 layout_adjusted = True
             action_state = states.get(action.id, {})
+            raw_status = action_state.get("status", "planned")
+            dry_status = "simulated" if raw_status in {"succeeded", "simulated"} else raw_status
             action_items.append(
                 {
                     "sequence": action.sequence,
                     "action_id": action.id,
                     "action_type": action_type,
-                    "status": action_state.get("status", "planned"),
+                    "status": dry_status,
+                    "simulation_status": "simulated",
+                    "policy_status": (
+                        "blocked"
+                        if raw_status == "blocked_by_policy"
+                        else "policy_allowed"
+                    ),
+                    "live_execution_status": "planned",
                     "risk_level": action.risk_level.value,
                     "requires_approval": action.requires_approval,
-                    "blocked": action_state.get("status") == "blocked_by_policy",
+                    "blocked": raw_status == "blocked_by_policy",
                 }
             )
         blocked_count = sum(item["blocked"] for item in action_items)
@@ -1332,6 +1398,10 @@ class FigureExecutionService:
             for item in action_items
             if item["requires_approval"]
         ]
+        review_items.extend(
+            f"连接端点未解析：{description}"
+            for description in unresolved_connections
+        )
         audit_events = self.database.list_audit_events(figure_id=figure_id)
         relevant_audit = next(
             (
@@ -1350,6 +1420,7 @@ class FigureExecutionService:
             metadata["completed"]
             and not metadata["failed"]
             and blocked_count == 0
+            and not unresolved_connections
             and self._dry_run_stale_reason(metadata) is None
         )
         target_canvas = metadata.get("target_canvas") or plan.get("target_canvas")
@@ -1390,6 +1461,7 @@ class FigureExecutionService:
                 "warning_count": len(warning_items),
                 "warnings": warning_items,
                 "manual_review_items": review_items,
+                "unresolved_connections": unresolved_connections,
                 "can_enter_live_run": can_enter_live,
             },
             "evidence": {
@@ -1420,6 +1492,7 @@ class FigureExecutionService:
                 confirmed_event = event
         source_event = completed_event or failed_event
         completed_payload = source_event["payload"] if source_event else {}
+        confirmed_payload = confirmed_event["payload"] if confirmed_event else {}
         return {
             "completed": completed_event is not None,
             "failed": failed_event is not None,
@@ -1429,6 +1502,25 @@ class FigureExecutionService:
             "canvas_fingerprint": completed_payload.get("canvas_fingerprint"),
             "target_canvas": completed_payload.get("target_canvas"),
             "source_plan_id": completed_payload.get("source_plan_id") or figure_id,
+            "confirmed_test_canvas": bool(
+                confirmed_payload.get("confirmed_test_canvas")
+                or (
+                    confirmed_event is not None
+                    and (completed_payload.get("target_canvas") or {}).get(
+                        "confirmed_test_canvas"
+                    )
+                )
+            ),
+            "real_biorender_accepted": bool(
+                confirmed_payload.get("real_biorender_accepted")
+                or confirmed_payload.get("confirmed_test_canvas")
+                or (
+                    confirmed_event is not None
+                    and (completed_payload.get("target_canvas") or {}).get(
+                        "confirmed_test_canvas"
+                    )
+                )
+            ),
         }
 
     def _plan_metadata(self, figure_id: str) -> dict[str, Any]:
@@ -2040,7 +2132,8 @@ class FigureExecutionService:
         if not actions:
             return 0
         done = sum(
-            item["status"] in {"verified", "succeeded", "blocked_by_policy", "failed"}
+            item["status"]
+            in {"verified", "succeeded", "simulated", "blocked_by_policy", "failed"}
             for item in actions
         )
         return round(done / len(actions) * 100)
@@ -2092,7 +2185,7 @@ class FigureExecutionService:
             (
                 item
                 for item in actions
-                if item["status"] not in {"verified", "succeeded", "skipped"}
+                if item["status"] not in {"verified", "succeeded", "simulated", "skipped"}
             ),
             None,
         )
@@ -2105,6 +2198,7 @@ class FigureExecutionService:
         return {
             "action_type": pending["action_type"],
             "status": pending["status"],
+            "error_type": pending.get("error_type"),
             "element": (
                 planned.arguments.get("logical_element_id")
                 if planned is not None
@@ -2125,7 +2219,7 @@ class FigureExecutionService:
             return "failed"
         if statuses & {"executing", "running", "executed_unverified"}:
             return "running"
-        if statuses <= {"verified", "succeeded"}:
+        if statuses <= {"verified", "succeeded", "simulated"}:
             return "completed"
         return "waiting"
 

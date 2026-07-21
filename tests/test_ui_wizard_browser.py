@@ -336,7 +336,7 @@ def test_dry_run_confirmation_state_survives_polling_reload_and_confirmation() -
             assert page.locator("#confirm-dry-run").is_enabled()
             assert "可以确认" in page.locator("#dry-run-confirm-reason").text_content()
             assert "PD-1 mechanism" in page.locator("#dry-title").text_content()
-            assert "不产生真实画布截图" in page.locator("#execution-evidence").text_content()
+            assert "不产生真实画布截图" in page.locator("#dry-screenshot-note").text_content()
 
             stale_once = True
             page.locator("#refresh-status").click()
@@ -387,6 +387,161 @@ def test_dry_run_confirmation_state_survives_polling_reload_and_confirmation() -
             assert page.locator("#confirm-dry-run").is_disabled()
             assert "当前画布已变化" in page.locator(
                 "#dry-run-confirm-reason"
+            ).text_content()
+        finally:
+            context.close()
+            browser.close()
+
+
+def test_live_failure_evidence_is_not_replaced_by_dry_run_polling() -> None:
+    html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    stylesheet = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+    live_id = "figure_live_1"
+    dry_id = "figure_dry_1"
+    evidence_calls = 0
+    live_summary = {
+        "run_id": live_id,
+        "status": "failed",
+        "friendly_status": "执行失败",
+        "failure_subcode": "search_ui_not_found",
+        "can_resume": False,
+        "resume_blocked_reason": "搜索能力准备失败；请修复后重新开始。",
+        "completed_actions": 1,
+        "total_actions": 94,
+        "progress_percent": 1,
+        "recent_logs": [
+            {
+                "action_type": "search_asset",
+                "status": "failed",
+                "message": "Live search input was not found",
+            }
+        ],
+        "steps": [],
+        "needs_review_elements": 0,
+    }
+    stale_dry_workflow = {
+        "state": "ready_to_execute",
+        "step": 4,
+        "dry_run_id": dry_id,
+        "dry_run_completed": True,
+        "dry_run_confirmed": True,
+        "can_confirm_dry_run": False,
+        "buttons": {"start_live": True},
+        "dry_run_summary": {
+            "target_canvas": {"confirmed_test_canvas": True},
+            "task": {"figure_title": "Dry report"},
+            "planned_actions": {},
+            "result": {"policy_check_passed": True, "can_enter_live_run": True},
+            "evidence": {
+                "screenshot_note": "安全预演不产生真实画布截图。",
+                "recent_logs": [
+                    {"action_type": "search_asset", "status": "simulated"}
+                ],
+            },
+            "dry_run_actions": [],
+        },
+    }
+
+    def route_request(route: Route) -> None:
+        nonlocal evidence_calls
+        path = urlparse(route.request.url).path
+        if path == "/ui":
+            route.fulfill(status=200, content_type="text/html", body=html)
+        elif path == "/ui-assets/app.js":
+            route.fulfill(status=200, content_type="application/javascript", body=javascript)
+        elif path == "/ui-assets/styles.css":
+            route.fulfill(status=200, content_type="text/css", body=stylesheet)
+        elif path == "/api/ui/status":
+            route.fulfill(
+                json={
+                    "backend": "normal",
+                    "database": "normal",
+                    "browser_login": "verified",
+                    "verified_canvas": {"figure_identifier": "redacted"},
+                    "active_jobs": [],
+                }
+            )
+        elif path == "/api/version":
+            route.fulfill(json={"git_commit": "test", "git_branch": "test"})
+        elif path == "/api/ui/workflow-state":
+            route.fulfill(json=stale_dry_workflow)
+        elif path == f"/api/ui/runs/{live_id}":
+            route.fulfill(json=live_summary)
+        elif path == f"/api/ui/runs/{live_id}/elements":
+            route.fulfill(json={"items": []})
+        elif path == f"/api/ui/runs/{live_id}/evidence":
+            evidence_calls += 1
+            route.fulfill(
+                json={
+                    "items": [
+                        {
+                            "id": 99,
+                            "kind": "failure",
+                            "name": "live-failure.png",
+                            "is_image": True,
+                            "preview_url": (
+                                "data:image/png;base64,"
+                                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0l"
+                                "EQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                            ),
+                        }
+                    ]
+                }
+            )
+        else:
+            route.fulfill(status=404, json={"error_code": "NOT_FOUND"})
+
+    saved = {
+        "step": 4,
+        "taskMode": "preset",
+        "canvasUrl": "https://app.biorender.com/figure/disposable",
+        "blankCanvasConfirmed": True,
+        "canvasVerified": True,
+        "planId": dry_id,
+        "dryRunId": dry_id,
+        "runId": live_id,
+        "currentJobId": None,
+    }
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context()
+        try:
+            context.add_init_script(
+                "localStorage.setItem('biorender-guided-workflow-v1', "
+                f"{json.dumps(json.dumps(saved))});"
+            )
+            page = context.new_page()
+            page.route("**/*", route_request)
+            page.goto("http://wizard.test/ui")
+            page.locator("#execution-evidence img").wait_for(state="visible")
+            assert "Live search input was not found" in page.locator(
+                "#recent-logs"
+            ).text_content()
+            assert live_id in page.locator("#evidence-source").text_content()
+            assert "search_ui_not_found" in page.locator(
+                "#failure-subcode"
+            ).text_content()
+            assert page.locator("#start-live").text_content() == "修复后重试"
+            page.evaluate(
+                "window.__liveEvidenceImage = document.querySelector('#execution-evidence img')"
+            )
+            previous_calls = evidence_calls
+            with page.expect_response(
+                lambda response: urlparse(response.url).path
+                == f"/api/ui/runs/{live_id}/evidence"
+            ):
+                page.locator("#refresh-status").click()
+            assert evidence_calls > previous_calls
+            assert page.evaluate(
+                "window.__liveEvidenceImage === document.querySelector('#execution-evidence img')"
+            )
+            assert "Live search input was not found" in page.locator(
+                "#recent-logs"
+            ).text_content()
+            assert "安全预演不产生真实截图" not in page.locator(
+                "#execution-evidence"
             ).text_content()
         finally:
             context.close()

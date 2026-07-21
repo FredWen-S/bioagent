@@ -9,8 +9,9 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from app.api.ui_routes import create_ui_router
-from app.operator.errors import CalibrationFailed
+from app.operator.errors import CalibrationFailed, SearchActionFailed
 from app.schemas.figure_spec import FigureStatus
+from app.schemas.gui_action import ActionStatus, GuiActionResult
 from app.schemas.ui import UiTaskInput
 from app.services.figure_execution_service import FigureExecutionService, UiServiceError
 from app.storage.database import FigureDatabase
@@ -152,6 +153,13 @@ def test_completed_dry_run_has_stable_confirmable_response_and_summary(
     assert summary["evidence"]["audit_event"]["event_type"] == "dry_run_completed"
     assert "不产生真实画布截图" in summary["evidence"]["screenshot_note"]
     assert summary["dry_run_actions"]
+    assert {item["status"] for item in summary["dry_run_actions"]} == {"simulated"}
+    assert {item["policy_status"] for item in summary["dry_run_actions"]} == {
+        "policy_allowed"
+    }
+    assert {item["live_execution_status"] for item in summary["dry_run_actions"]} == {
+        "planned"
+    }
 
 
 def test_workflow_recovers_dry_run_from_plan_id_without_local_dry_run_id(
@@ -249,6 +257,74 @@ def test_confirmed_dry_run_unlocks_live_and_survives_service_refresh(
     assert workflow["state"] == "ready_to_execute"
     assert workflow["dry_run_confirmed"] is True
     assert workflow["buttons"]["start_live"] is True
+    metadata = refreshed._dry_run_metadata(str(dry_run["dry_run_id"]))
+    assert metadata["confirmed_test_canvas"] is True
+    assert metadata["real_biorender_accepted"] is True
+
+
+def test_unresolved_connection_blocks_live_and_requires_manual_review(
+    ui_service: FigureExecutionService,
+) -> None:
+    _task, _plan, dry_run = _prepare_guided_dry_run(ui_service)
+    original = ui_service.database.list_actions(str(dry_run["dry_run_id"]))
+    changed = []
+    connection_changed = False
+    for action in original:
+        if action.action.value == "connect_elements" and not connection_changed:
+            changed.append(
+                action.model_copy(
+                    update={
+                        "arguments": {
+                            **action.arguments,
+                            "source_entity_id": None,
+                            "target_entity_id": None,
+                            "source_id": None,
+                            "target_id": None,
+                            "source_element_id": None,
+                            "target_element_id": None,
+                        }
+                    }
+                )
+            )
+            connection_changed = True
+        else:
+            changed.append(action)
+    ui_service.database.list_actions = lambda _figure_id: changed  # type: ignore[method-assign]
+
+    summary = ui_service._dry_run_summary(str(dry_run["dry_run_id"]))
+
+    assert "? → ?" in summary["result"]["unresolved_connections"]
+    assert "连接端点未解析：? → ?" in summary["result"]["manual_review_items"]
+    assert summary["result"]["can_enter_live_run"] is False
+
+
+def test_explicit_live_run_state_takes_precedence_over_source_dry_run(
+    ui_service: FigureExecutionService,
+) -> None:
+    task, plan, dry_run = _prepare_guided_dry_run(ui_service)
+    ui_service.confirm_dry_run(
+        str(dry_run["dry_run_id"]),
+        task_fingerprint=str(plan["task_fingerprint"]),
+        plan_fingerprint=str(plan["plan_fingerprint"]),
+        source_plan_id=str(plan["run_id"]),
+        editor_url="https://app.biorender.com/figure/disposable-test",
+    )
+    live = ui_service.plan_task(task)
+    ui_service.database.add_audit_event(
+        "live_started_from_confirmed_dry_run",
+        {"dry_run_id": dry_run["dry_run_id"], "plan_id": plan["run_id"]},
+        figure_id=live.figure_spec.id,
+    )
+
+    workflow = ui_service.workflow_state(
+        plan_id=str(plan["run_id"]),
+        dry_run_id=str(dry_run["dry_run_id"]),
+        run_id=live.figure_spec.id,
+    )
+
+    assert workflow["active_run_id"] == live.figure_spec.id
+    assert workflow["current_workflow_state"] != "ready_to_execute"
+    assert workflow["buttons"]["start_live"] is False
 
 
 def test_plan_endpoint_enforces_login_and_canvas_gate(client: TestClient) -> None:
@@ -309,6 +385,38 @@ def test_calibration_failure_is_not_resumable(
     assert payload["resume_blocked_reason"]
     assert payload["prepare_failure"]["subcode"] == "ui_calibration_failed"
     assert payload["prepare_failure"]["missing_anchors"] == ["asset_panel"]
+
+
+def test_search_preparation_failure_is_not_resumable(
+    ui_service: FigureExecutionService,
+) -> None:
+    class SearchFailureOperator:
+        def execute(self, action, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            if action.action.value != "search_asset":
+                return GuiActionResult(
+                    action_id=action.id,
+                    status=ActionStatus.VERIFIED,
+                    attempt=1,
+                    message="prepared",
+                )
+            raise SearchActionFailed(
+                "search box missing",
+                subcode="search_ui_not_found",
+                diagnostics={"last_operation": "wait_for_search_input"},
+                retryable=False,
+            )
+
+        def close(self) -> None:
+            return None
+
+    bundle = ui_service.plan_task(UiTaskInput.model_validate(_preset_task()))
+    status = ui_service.engine.execute(bundle.figure_spec.id, SearchFailureOperator())
+    payload = ui_service.run_summary(bundle.figure_spec.id)
+
+    assert status == FigureStatus.FAILED
+    assert payload["failure_subcode"] == "search_ui_not_found"
+    assert payload["can_resume"] is False
+    assert "搜索能力准备失败" in payload["resume_blocked_reason"]
 
 
 @pytest.mark.parametrize(

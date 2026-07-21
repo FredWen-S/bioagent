@@ -627,12 +627,13 @@ class FigureDatabase:
             rows = connection.execute(
                 """
                 SELECT payload_json FROM gui_actions
-                WHERE figure_id = ? AND status NOT IN (?, ?, ?, ?, ?)
+                WHERE figure_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?)
                 ORDER BY sequence
                 """,
                 (
                     figure_id,
                     ActionStatus.SUCCEEDED.value,
+                    ActionStatus.SIMULATED.value,
                     ActionStatus.VERIFIED.value,
                     ActionStatus.EXECUTED_UNVERIFIED.value,
                     ActionStatus.UNKNOWN.value,

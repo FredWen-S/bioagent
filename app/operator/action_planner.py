@@ -64,6 +64,9 @@ class GuiActionPlanner:
                     "max_queries": len(item.search_terms),
                 },
             )
+            actions[-1] = actions[-1].model_copy(
+                update={"max_retries": 0, "timeout_seconds": 30.0}
+            )
             add(
                 ActionType.SELECT_ASSET,
                 {

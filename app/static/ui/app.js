@@ -65,6 +65,8 @@ const state = {
   pollTimer: null,
   workflow: null,
   summary: null,
+  evidenceRunId: null,
+  evidenceSignature: null,
   planSummary: null,
   environment: null,
   hasSavedState: false
@@ -356,23 +358,18 @@ function renderDryRunSummary(summary) {
   setText("dry-audit", audit ? `${audit.event_type} · ${new Date(audit.created_at).toLocaleString()}` : "未找到 dry-run 审计事件");
   const rows = (summary.dry_run_actions || []).map((item) => {
     const row = document.createElement("tr");
+    const dryStatus = item.status === "simulated" ? "模拟通过" : item.status;
+    const policyStatus = item.policy_status === "policy_allowed" ? "策略允许" : item.policy_status;
+    const liveStatus = item.live_execution_status === "planned" ? "计划执行" : item.live_execution_status;
     row.append(
       Object.assign(document.createElement("td"), { textContent: String(item.sequence) }),
       Object.assign(document.createElement("td"), { textContent: actionLabels[item.action_type] || item.action_type }),
-      Object.assign(document.createElement("td"), { textContent: item.status }),
-      Object.assign(document.createElement("td"), { textContent: item.blocked ? "已阻止" : item.risk_level })
+      Object.assign(document.createElement("td"), { textContent: `${dryStatus} / ${policyStatus}` }),
+      Object.assign(document.createElement("td"), { textContent: item.blocked ? "已阻止" : `${liveStatus} · ${item.risk_level}` })
     );
     return row;
   });
   byId("dry-action-body").replaceChildren(...rows);
-  const logItems = (evidence.recent_logs || []).map((entry) => {
-    const item = document.createElement("li");
-    item.textContent = `${actionLabels[entry.action_type] || entry.action_type}：${entry.status}`;
-    return item;
-  });
-  byId("recent-logs").replaceChildren(...(logItems.length ? logItems : [Object.assign(document.createElement("li"), { textContent: "预演未生成动作日志。" })]));
-  byId("execution-evidence").replaceChildren(Object.assign(document.createElement("span"), { textContent: evidence.screenshot_note || "安全预演不产生真实画布截图。" }));
-  byId("advanced-details").textContent = JSON.stringify(summary, null, 2);
   saveState();
 }
 
@@ -415,11 +412,17 @@ function statusClass(status) {
   return "status-pill status-default";
 }
 
-function renderEvidence(items) {
+function renderEvidence(items, runId) {
   const grid = byId("evidence-grid");
   const images = (items || []).filter((item) => item.is_image && item.preview_url);
+  const signature = `${runId || "none"}|${images.map((item) => `${item.id}:${item.preview_url}`).join("|")}`;
+  setText("evidence-source", runId ? `Live Run ${runId}` : "尚无 Live Run");
+  if (state.evidenceSignature === signature && state.evidenceRunId === runId) return;
+  state.evidenceSignature = signature;
+  state.evidenceRunId = runId;
   if (!images.length) {
-    grid.replaceChildren(Object.assign(document.createElement("p"), { className: "empty-card", textContent: "暂无截图" }));
+    grid.replaceChildren(Object.assign(document.createElement("p"), { className: "empty-card", textContent: "当前 Live Run 暂无截图" }));
+    byId("execution-evidence").replaceChildren(Object.assign(document.createElement("span"), { textContent: "当前 Live Run 暂无截图" }));
     return;
   }
   const fragment = document.createDocumentFragment();
@@ -464,6 +467,8 @@ function renderSummary(summary) {
   state.summary = summary;
   state.runId = summary.run_id;
   const displayStatus = finalStatus(summary);
+  setText("evidence-source", `Live Run ${summary.run_id}`);
+  setText("failure-subcode", summary.failure_subcode || "-");
   setText("result-status", displayStatus);
   setText("result-run-id", summary.run_id);
   setText("result-verified", summary.verified_elements || 0);
@@ -492,6 +497,12 @@ function renderSummary(summary) {
     if (small) small.textContent = progressLabels[item.status] || item.status;
   });
   setText("result-message", displayStatus === "已完成但需要人工检查" ? "任务已结束，但 unknown 元素不能视为成功，请人工检查截图。" : `最终状态：${displayStatus}。`);
+  if (summary.status === "failed") {
+    setText(
+      "job-message",
+      `Live Run 失败（${summary.failure_subcode || "unknown"}）。${summary.can_resume ? "可继续未完成任务。" : summary.resume_blocked_reason || "请修复后重新开始。"}`
+    );
+  }
   byId("advanced-details").textContent = JSON.stringify(summary, null, 2);
   byId("result-json").textContent = JSON.stringify(summary, null, 2);
   byId("verify-run").disabled = !state.runId || state.busy;
@@ -507,9 +518,10 @@ async function loadRun(runId) {
     api(`/api/ui/runs/${encodeURIComponent(runId)}/elements`),
     api(`/api/ui/runs/${encodeURIComponent(runId)}/evidence`)
   ]);
+  if (state.runId && state.runId !== runId) return;
   renderSummary(summary);
   renderElements(elements.items);
-  renderEvidence(evidence.items);
+  renderEvidence(evidence.items, runId);
 }
 
 function setJob(job) {
@@ -902,6 +914,7 @@ function updateControls() {
   else if (workflow.can_confirm_dry_run !== true) confirmReason = workflow.reason || "后端尚未允许确认。";
   setText("dry-run-confirm-reason", confirmReason);
   byId("start-live").disabled = state.busy || backendButtons.start_live !== true;
+  byId("start-live").textContent = state.summary?.status === "failed" ? "修复后重试" : "开始执行";
   byId("resume-run").disabled = state.busy || backendButtons.resume !== true;
   byId("safe-stop").disabled = !state.currentJobId && !state.runId || !["login_checking", "canvas_validating", "executing", "stop_requested", "verifying", "paused"].includes(workflowState);
   byId("previous-step").disabled = state.busy || state.step <= 1;

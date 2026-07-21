@@ -62,6 +62,42 @@ class SearchNoResult(OperatorError):
     error_type = "search_no_result"
 
 
+class SearchActionFailed(OperatorError):
+    VALID_SUBCODES = frozenset(
+        {
+            "search_ui_not_found",
+            "search_input_not_editable",
+            "search_submit_failed",
+            "search_results_timeout",
+            "search_no_results",
+            "search_rate_limited",
+            "page_closed",
+            "redirected_to_login",
+        }
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        subcode: str,
+        diagnostics: dict[str, Any] | None = None,
+        retryable: bool = False,
+        screenshot_path: str | None = None,
+    ) -> None:
+        if subcode not in self.VALID_SUBCODES:
+            raise ValueError(f"unknown search failure subcode: {subcode!r}")
+        super().__init__(message, screenshot_path=screenshot_path)
+        self.error_type = subcode
+        self.subcode = subcode
+        self.diagnostics = dict(diagnostics or {})
+        self.retryable = retryable
+
+
+class SafeStopRequested(OperatorError):
+    error_type = "safe_stop_requested"
+
+
 class DragDropFailed(OperatorError):
     error_type = "drag_drop_failed"
 
